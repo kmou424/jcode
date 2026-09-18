@@ -82,9 +82,21 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
             if IMPORT_SOURCE_CODES.contains(&other) {
                 other.to_string()
             } else {
-                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
+                // Named `[providers.<key>]` profiles may carry a display_name;
+                // prefer it over the raw profile key.
+                crate::config::config()
+                    .providers
+                    .get(other)
+                    .and_then(|profile| profile.display_name.as_deref())
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        let profile_id =
+                            other.strip_prefix("openai-compatible:").unwrap_or(other);
+                        crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                            .map(|profile| profile.display_name.to_string())
+                    })
                     .unwrap_or_else(|| other.to_string())
             }
         }

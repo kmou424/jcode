@@ -256,6 +256,16 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
     if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
         let trimmed = profile_name.trim();
         if !trimmed.is_empty() {
+            // Named `[providers.<name>]` profiles may carry a display_name.
+            if let Some(label) = crate::config::config()
+                .providers
+                .get(trimmed)
+                .and_then(|profile| profile.display_name.as_deref())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+            {
+                return Some(label.to_string());
+            }
             return Some(trimmed.to_string());
         }
     }
@@ -268,6 +278,17 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
             .find(|profile| profile.id == trimmed)
         {
             return Some(profile.display_name.to_string());
+        }
+        // Cache namespace can also point at a named `[providers.<name>]`
+        // profile before the named-profile env is set; honor its display_name.
+        if let Some(label) = crate::config::config()
+            .providers
+            .get(trimmed)
+            .and_then(|profile| profile.display_name.as_deref())
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            return Some(label.to_string());
         }
     }
 
@@ -1251,6 +1272,117 @@ pub fn configured_api_key_source(
     }
 
     Some((env_key, file_name))
+}
+
+/// Look up the user-configured `display_name` for a model declared under
+/// `[[providers.<profile>.models]]`. Returns `None` when the profile or model
+/// is unknown, or when the entry has no explicit display name. The UI uses
+/// this before falling back to heuristic prettification of the raw model id.
+pub fn named_provider_model_display_name(profile_name: &str, model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if profile_name.trim().is_empty() || model_id.is_empty() {
+        return None;
+    }
+    crate::config::config()
+        .providers
+        .get(profile_name.trim())
+        .and_then(|profile| {
+            profile.models.iter().find_map(|model| {
+                if model.id.trim().eq_ignore_ascii_case(model_id) {
+                    model
+                        .display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Look up the display name for a model on the *active* named provider
+/// profile (`JCODE_NAMED_PROVIDER_PROFILE`), if any. Convenience wrapper for
+/// UI code that only knows the model id.
+pub fn active_named_provider_model_display_name(model_id: &str) -> Option<String> {
+    let profile = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").ok())
+        .filter(|v| !v.trim().is_empty())?;
+    named_provider_model_display_name(&profile, model_id)
+}
+
+/// Like [`active_named_provider_model_display_name`] but resolves the active
+/// profile from the provider label the caller already displays instead of
+/// relying on env vars. The TUI client process often does not inherit
+/// `JCODE_NAMED_PROVIDER_PROFILE`/`JCODE_OPENROUTER_CACHE_NAMESPACE` (they are
+/// set inside the agent/server process), so header/picker code must resolve
+/// the named profile by matching `provider_label` against each
+/// `[providers.<key>]`'s key or `display_name`.
+pub fn named_provider_model_display_name_for_provider_label(
+    provider_label: &str,
+    model_id: &str,
+) -> Option<String> {
+    if let Some(label) = active_named_provider_model_display_name(model_id) {
+        return Some(label);
+    }
+    let label = provider_label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let providers = &crate::config::config().providers;
+    // Match by profile key first, then by configured display_name.
+    let profile_key = providers
+        .keys()
+        .find(|key| key.trim().eq_ignore_ascii_case(label))
+        .cloned()
+        .or_else(|| {
+            providers.iter().find_map(|(key, profile)| {
+                profile
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| name.eq_ignore_ascii_case(label))
+                    .map(|_| key.clone())
+            })
+        })?;
+    named_provider_model_display_name(&profile_key, model_id)
+}
+
+/// Model `display_name` lookup that does not need the active profile: returns
+/// the configured label only when exactly one `[providers.*]` profile declares
+/// this model id. Used by UI surfaces (model picker, header) that run in the
+/// TUI client process without the agent's `JCODE_NAMED_PROVIDER_PROFILE` env,
+/// where the env-based lookup cannot resolve the profile.
+pub fn unique_named_provider_model_display_name(model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    let mut found: Option<String> = None;
+    for profile in crate::config::config().providers.values() {
+        for model in &profile.models {
+            if !model.id.trim().eq_ignore_ascii_case(model_id) {
+                continue;
+            }
+            let label = model
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty());
+            if let Some(label) = label {
+                if found.is_some() {
+                    // Ambiguous: two profiles name this model id differently.
+                    return None;
+                }
+                found = Some(label.to_string());
+            }
+        }
+    }
+    found
 }
 
 fn env_override(name: &str) -> Option<String> {

@@ -32,6 +32,16 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
         return "your default model".to_string();
     }
 
+    // A `[[providers.<profile>.models]]` entry with an explicit
+    // `display_name` wins over every heuristic. This is how custom
+    // OpenAI-compatible endpoints name their models (e.g. `swe-2` -> "SWE 2").
+    if let Some(label) =
+        crate::provider_catalog::active_named_provider_model_display_name(model)
+            .or_else(|| crate::provider_catalog::unique_named_provider_model_display_name(model))
+    {
+        return label;
+    }
+
     // Preserve bracketed route suffixes (`[1m]`, `[web]`) and re-attach them as
     // a parenthetical, since they are jcode-side route markers rather than part
     // of the upstream family/version name.
