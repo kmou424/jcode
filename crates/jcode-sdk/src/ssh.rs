@@ -154,78 +154,9 @@ impl SshConnectOptions {
         Ok(())
     }
 
-    pub(crate) fn command(&self) -> Result<Command> {
-        self.command_with_control(None)
-    }
-
-    fn command_with_control(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
-            shell_quote(&self.remote_binary)
-        );
-        self.command_for(control, &remote)
-    }
-
-    /// Run a POSIX shell script on the host with the same authentication,
-    /// host-key pinning and hardening as the API connection.
-    ///
-    /// The script travels on stdin (`sh -s`), never in argv, so it may carry
-    /// secrets. `$JCODE_BIN` names the configured remote binary. The process is
-    /// killed when `timeout` elapses. Output is returned even on a non-zero exit.
-    pub fn run_script(&self, script: &[u8], timeout: Duration) -> Result<std::process::Output> {
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; JCODE_BIN={}; export JCODE_BIN; exec sh -s",
-            shell_quote(&self.remote_binary)
-        );
-        let mut command = self.command_for(None, &remote)?;
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| Error::new(ErrorKind::Transport, format!("could not start ssh: {e}")))?;
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let script = script.to_vec();
-        let writer = std::thread::spawn(move || {
-            let _ = stdin.write_all(&script);
-        });
-        let read = |mut pipe: Box<dyn Read + Send>| {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
-                bytes
-            })
-        };
-        let stdout = read(Box::new(child.stdout.take().expect("piped stdout")));
-        let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
-        let deadline = std::time::Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| {
-                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
-            })? {
-                break status;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::new(ErrorKind::Timeout, "remote script timed out"));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        let _ = writer.join();
-        Ok(std::process::Output {
-            status,
-            stdout: stdout.join().unwrap_or_default(),
-            stderr: stderr.join().unwrap_or_default(),
-        })
-    }
-
-    fn command_for(
-        &self,
-        control: Option<(&std::path::Path, bool)>,
-        remote: &str,
-    ) -> Result<Command> {
+    /// SSH argv shared by every call: validation, host-key pinning, hardening
+    /// and control-socket flags. No host or remote-source argument is appended.
+    fn base_command(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
         if self.isolated_config {
@@ -305,8 +236,137 @@ impl SshConnectOptions {
         if let Some(user) = &self.user {
             command.arg("-l").arg(user);
         }
-        // SSH joins remote arguments into shell source. Supply exactly one;
-        // callers quote the executable as a literal POSIX shell word.
+        Ok(command)
+    }
+
+    /// `env` is a single bare command, valid source under every login shell
+    /// (fish, POSIX sh, csh). Its output carries `SHELL=<login shell path>`.
+    fn probe_command(&self) -> Result<Command> {
+        let mut command = self.base_command(None)?;
+        command.arg("--").arg(&self.host).arg("env");
+        Ok(command)
+    }
+
+    /// Blocking probe of the remote login shell. Failures fall back to POSIX,
+    /// matching previous behavior. Bounded by ssh ConnectTimeout.
+    pub(crate) fn probe_shell(&self) -> RemoteShell {
+        let output = self.probe_command().ok().and_then(|mut command| {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+        });
+        match output.filter(|o| o.status.success()) {
+            Some(output) => parse_remote_shell(&output.stdout),
+            None => RemoteShell::Posix,
+        }
+    }
+
+    /// Remote-source PATH prefix in the dialect of `shell`.
+    fn remote_env_prefix(&self, shell: RemoteShell) -> &'static str {
+        match shell {
+            // fish: `set PATH a b $PATH` assigns a path list, exported
+            // colon-joined. `PATH="...$PATH"` POSIX syntax is a fish error.
+            RemoteShell::Fish => "set PATH \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" $PATH; ",
+            RemoteShell::Posix => {
+                "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; "
+            }
+        }
+    }
+
+    pub(crate) fn command(&self, shell: RemoteShell) -> Result<Command> {
+        self.command_with_control(None, shell)
+    }
+
+    fn command_with_control(
+        &self,
+        control: Option<(&std::path::Path, bool)>,
+        shell: RemoteShell,
+    ) -> Result<Command> {
+        let remote = format!(
+            "{}exec {} --no-update api --stdio",
+            self.remote_env_prefix(shell),
+            shell_quote(&self.remote_binary)
+        );
+        self.command_for(control, &remote)
+    }
+
+    /// Run a POSIX shell script on the host with the same authentication,
+    /// host-key pinning and hardening as the API connection.
+    ///
+    /// The script travels on stdin (`sh -s`), never in argv, so it may carry
+    /// secrets. `$JCODE_BIN` names the configured remote binary. The process is
+    /// killed when `timeout` elapses. Output is returned even on a non-zero exit.
+    /// The launcher prefix is probed for the remote login shell so fish hosts
+    /// accept it (`set -x`, not `VAR=x; export`).
+    pub fn run_script(&self, script: &[u8], timeout: Duration) -> Result<std::process::Output> {
+        let shell = self.probe_shell();
+        let remote = match shell {
+            RemoteShell::Fish => format!(
+                "{}set -x JCODE_BIN {}; exec sh -s",
+                self.remote_env_prefix(shell),
+                shell_quote(&self.remote_binary)
+            ),
+            RemoteShell::Posix => format!(
+                "{}JCODE_BIN={}; export JCODE_BIN; exec sh -s",
+                self.remote_env_prefix(shell),
+                shell_quote(&self.remote_binary)
+            ),
+        };
+        let mut command = self.command_for(None, &remote)?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| Error::new(ErrorKind::Transport, format!("could not start ssh: {e}")))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let script = script.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&script);
+        });
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
+                bytes
+            })
+        };
+        let stdout = read(Box::new(child.stdout.take().expect("piped stdout")));
+        let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| {
+                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
+            })? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::new(ErrorKind::Timeout, "remote script timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let _ = writer.join();
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+
+    /// Low-level remote execution: `ssh <opts> -- <host> [remote]`. SSH joins
+    /// remote arguments into shell source; supply exactly one source string.
+    fn command_for(
+        &self,
+        control: Option<(&std::path::Path, bool)>,
+        remote: &str,
+    ) -> Result<Command> {
+        let mut command = self.base_command(control)?;
         command.arg("--").arg(&self.host);
         if !control.is_some_and(|(_, master)| master) {
             command.arg(remote);
@@ -359,6 +419,8 @@ impl WeakSharedSshTransport {
 #[cfg(unix)]
 struct SharedSshInner {
     options: SshConnectOptions,
+    /// Remote login shell, probed once for this shared connection.
+    shell: std::sync::OnceLock<RemoteShell>,
     // Drop the process before the directory, even on setup errors.
     master: Mutex<Option<Result<Arc<SshProcess>>>>,
     directory: tempfile::TempDir,
@@ -400,6 +462,7 @@ impl SharedSshTransport {
         Ok(Self {
             inner: Arc::new(SharedSshInner {
                 options,
+                shell: std::sync::OnceLock::new(),
                 master: Mutex::new(None),
                 directory,
             }),
@@ -445,7 +508,7 @@ impl SharedSshTransport {
                 let transport = SshTransport::spawn_command(configure(
                     self.inner
                         .options
-                        .command_with_control(Some((&socket, true)))?,
+                        .command_with_control(Some((&socket, true)), RemoteShell::Posix)?,
                 ))?;
                 let process = Arc::clone(&transport.process);
                 drop(transport);
@@ -485,10 +548,14 @@ impl SharedSshTransport {
             .ok_or_else(timeout)?;
         // Even if the socket disappears after setup, ProxyCommand=false ensures
         // OpenSSH cannot silently establish a second authenticated connection.
+        let shell = *self
+            .inner
+            .shell
+            .get_or_init(|| self.inner.options.probe_shell());
         let mut transport = SshTransport::spawn_command(configure(
             self.inner
                 .options
-                .command_with_control(Some((&socket, false)))?,
+                .command_with_control(Some((&socket, false)), shell)?,
         ))?;
         let process = Arc::get_mut(&mut transport.process).expect("new SSH process");
         process.shared_owner = Mutex::new(Some(Arc::clone(&self.inner)));
@@ -496,6 +563,26 @@ impl SharedSshTransport {
         let mut options = self.inner.options.clone();
         options.connect_timeout = remaining;
         crate::JcodeClient::over_ssh(transport, options)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteShell {
+    Posix,
+    Fish,
+}
+
+fn parse_remote_shell(output: &[u8]) -> RemoteShell {
+    let text = String::from_utf8_lossy(output);
+    let name = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SHELL="))
+        .map(|path| path.rsplit('/').next().unwrap_or_default())
+        .unwrap_or_default();
+    if name == "fish" {
+        RemoteShell::Fish
+    } else {
+        RemoteShell::Posix
     }
 }
 
@@ -625,7 +712,8 @@ pub(crate) struct SshTransport {
 
 impl SshTransport {
     pub(crate) fn spawn(options: &SshConnectOptions) -> Result<Self> {
-        Self::spawn_command(options.command()?)
+        let shell = options.probe_shell();
+        Self::spawn_command(options.command(shell)?)
     }
 
     pub(crate) fn spawn_command(mut command: Command) -> Result<Self> {
@@ -772,7 +860,9 @@ mod tests {
             "-user@host",
         ] {
             assert!(
-                SshConnectOptions::new(host).command().is_err(),
+                SshConnectOptions::new(host)
+                    .command(RemoteShell::Posix)
+                    .is_err(),
                 "accepted {host:?}"
             );
         }
@@ -784,22 +874,24 @@ mod tests {
             "fe80::1%eth0",
         ] {
             assert!(
-                SshConnectOptions::new(host).command().is_ok(),
+                SshConnectOptions::new(host)
+                    .command(RemoteShell::Posix)
+                    .is_ok(),
                 "rejected {host}"
             );
         }
         let mut opts = options();
         opts.user = Some("root;evil".into());
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.user = None;
         opts.port = Some(0);
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.port = None;
         opts.connect_timeout = Duration::ZERO;
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.connect_timeout = Duration::from_secs(2);
         opts.client_name = "\0".repeat(1024);
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
     }
 
     #[test]
@@ -810,7 +902,7 @@ mod tests {
         opts.identity_file = Some("/run/jcode/key".into());
         opts.known_hosts_file = Some("/run/jcode/known_hosts".into());
         opts.isolated_config = true;
-        let command = opts.command().unwrap();
+        let command = opts.command(RemoteShell::Posix).unwrap();
         let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
         assert!(args.windows(2).any(|a| a == ["-F", "/dev/null"]));
         for expected in [
@@ -827,11 +919,17 @@ mod tests {
         for bad in ["relative/key", "/tmp/%h", "/tmp/a\nb"] {
             let mut opts = opts.clone();
             opts.identity_file = Some(bad.into());
-            assert!(opts.command().is_err(), "accepted identity {bad:?}");
+            assert!(
+                opts.command(RemoteShell::Posix).is_err(),
+                "accepted identity {bad:?}"
+            );
             let mut opts = opts.clone();
             opts.identity_file = None;
             opts.known_hosts_file = Some(bad.into());
-            assert!(opts.command().is_err(), "accepted known_hosts {bad:?}");
+            assert!(
+                opts.command(RemoteShell::Posix).is_err(),
+                "accepted known_hosts {bad:?}"
+            );
         }
     }
 
@@ -841,7 +939,7 @@ mod tests {
         opts.port = Some(2222);
         opts.user = Some("alice".into());
         opts.remote_binary = "/opt/a b/jcode'$(false)".into();
-        let command = opts.command().unwrap();
+        let command = opts.command(RemoteShell::Posix).unwrap();
         let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
         assert_eq!(command.get_program(), "ssh");
         assert!(args.contains(&"StrictHostKeyChecking=yes"));

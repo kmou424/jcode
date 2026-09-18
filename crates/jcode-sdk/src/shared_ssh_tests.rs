@@ -22,7 +22,7 @@ fn shared_private_identity_weak_lifetime_and_fail_closed_options() {
     let command = first
         .inner
         .options
-        .command_with_control(Some((&path.join("master"), false)))
+        .command_with_control(Some((&path.join("master"), false)), RemoteShell::Posix)
         .unwrap();
     let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
     for required in [
