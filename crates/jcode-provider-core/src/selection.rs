@@ -568,6 +568,8 @@ mod tests {
     fn dedupes_model_routes_by_route_identity() {
         let routes = vec![
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -577,6 +579,8 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -586,6 +590,8 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "b".to_string(),
@@ -605,6 +611,8 @@ mod tests {
     fn dedupes_openai_compatible_generic_and_profile_aliases() {
         let routes = vec![
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible".to_string(),
@@ -614,6 +622,8 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras".to_string(),
@@ -623,6 +633,8 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "qwen".to_string(),
                 provider: "OtherDirect".to_string(),
                 api_method: "openai-compatible:other".to_string(),
@@ -632,6 +644,8 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras-alt".to_string(),
@@ -684,6 +698,8 @@ mod tests {
             let m = models[(seed >> 17) as usize % models.len()];
             let a = api_methods[(seed >> 27) as usize % api_methods.len()];
             routes.push(ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: m.to_string(),
                 provider: p.to_string(),
                 api_method: a.to_string(),

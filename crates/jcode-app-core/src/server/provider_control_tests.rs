@@ -220,6 +220,8 @@ impl Provider for AuthChangeMockProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
+                display_name: None,
+                context_window: None,
                 model,
                 provider: provider.clone(),
                 api_method: api_method.clone(),
@@ -363,6 +365,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
                 provider_model,
                 available_models,
                 available_model_routes,
+                ..
             } => {
                 saw_models = Some((
                     provider_name,
@@ -901,6 +904,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     let provider = Arc::new(AuthChangeMockProvider::new());
     *provider.state.routes_override.write().unwrap() = Some(vec![
         ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-oauth".to_string(),
@@ -910,6 +915,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -919,6 +926,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "gpt-5.6-sol".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1399,6 +1408,7 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
                 provider_model,
                 available_models,
                 available_model_routes,
+                ..
             } => {
                 saw_models = Some((
                     provider_name,

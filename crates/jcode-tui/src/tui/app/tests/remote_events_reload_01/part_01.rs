@@ -71,7 +71,9 @@ fn test_remote_bus_productivity_failure_clears_refresh_state() {
     assert!(handled);
     assert!(!app.productivity_refreshing);
     assert_eq!(
-        app.status_notice.as_ref().map(|(notice, _)| notice.as_str()),
+        app.status_notice
+            .as_ref()
+            .map(|(notice, _)| notice.as_str()),
         Some("Productivity report failed")
     );
     assert!(
@@ -183,6 +185,9 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -237,6 +242,9 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
@@ -291,6 +299,9 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
@@ -372,6 +383,9 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -460,16 +474,18 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     );
     // The client-side /rewind path arms a pending notice before the server's
     // History redelivery arrives (remote/key_handling.rs).
-    app.pending_remote_rewind_notice =
-        Some(crate::tui::app::PendingRemoteRewindNotice {
-            undo: false,
-            message_index: Some(1),
-            changed_messages: 2,
-        });
+    app.pending_remote_rewind_notice = Some(crate::tui::app::PendingRemoteRewindNotice {
+        undo: false,
+        message_index: Some(1),
+        changed_messages: 2,
+    });
 
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -539,7 +555,8 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
 }
 
 #[test]
-fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview() {
+fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview()
+{
     // Multi-client rewind fan-out pin (server side has NO fan-out: a /rewind
     // History redelivery is written only to the rewinding connection's socket,
     // per-client event channel, server/client_lifecycle.rs:521 and
@@ -580,6 +597,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
     // Same-session, rewind-truncated payload this client never requested.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -632,9 +652,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         "unsolicited same-session History must not replace a bootstrapped mid-stream transcript"
     );
     assert!(
-        !app.display_messages()
-            .iter()
-            .any(|m| m.content.contains("truncated payload from another client's rewind")),
+        !app.display_messages().iter().any(|m| m
+            .content
+            .contains("truncated payload from another client's rewind")),
         "unsolicited same-session History payload should be dropped, not applied"
     );
     // Live stream state preserved: preview and streaming text survive.
@@ -663,6 +683,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         );
         app.handle_server_event(
             crate::protocol::ServerEvent::History {
+                model_display_name: None,
+                model_context_window: None,
+                available_efforts: None,
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
@@ -766,6 +789,9 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -827,15 +853,11 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
 
     // The stale Done from the rewound-away turn arrives AFTER the truncated
     // History (mpsc forwarder ordering).
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Done { id: 7 },
-        &mut remote,
-    );
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 7 }, &mut remote);
 
     assert!(!app.is_processing, "late Done should settle the turn");
     assert!(
-        !app
-            .display_messages()
+        !app.display_messages()
             .iter()
             .any(|m| m.content.contains("rewound-away assistant text")),
         "late Done must not resurrect assistant text that the rewind removed"
@@ -862,6 +884,9 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -1310,8 +1335,10 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
     app.status = ProcessingStatus::Streaming;
     app.streaming.streaming_tps_collect_output = true;
 
-    let needs_redraw =
-        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(needs_redraw);
     assert!(app.stream_message_ended);
@@ -1334,14 +1361,19 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     app.apply_stream_ops(ops);
     assert!(!app.stream_buffer.is_empty());
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
     assert!(app.is_processing, "Done must not force-flush the backlog");
     assert_eq!(app.deferred_stream_done_id, Some(42));
-    assert!(app.display_messages.iter().all(|message| {
-        message.role != "assistant" || !message.content.contains(response)
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .all(|message| { message.role != "assistant" || !message.content.contains(response) })
+    );
 
     // The first tick drains the short backlog, but deliberately leaves the live
     // streaming representation visible for one frame before committing it.
@@ -1357,9 +1389,11 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
     assert!(!app.is_processing);
     assert_eq!(app.deferred_stream_done_id, None);
-    assert!(app.display_messages.iter().any(|message| {
-        message.role == "assistant" && message.content == response
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == response })
+    );
 }
 
 #[test]
@@ -1464,7 +1498,10 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
     );
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(4));
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(app.streaming.streaming_tps_collect_output);
     assert!(app.streaming.streaming_tps_start.is_none());
@@ -1510,7 +1547,10 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
         },
         &mut remote,
     );
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 100,
@@ -1551,7 +1591,9 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         id: "tool_1".to_string(),
         name: "bash".to_string(),
         input: serde_json::Value::Null,
-        intent: None, thought_signature: None, });
+        intent: None,
+        thought_signature: None,
+    });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
         .push("pending soft interrupt".to_string());
@@ -1980,6 +2022,9 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
     // The bootstrap for a brand-new session clears the transcript.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],

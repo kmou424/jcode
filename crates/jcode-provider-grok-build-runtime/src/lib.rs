@@ -217,6 +217,8 @@ impl Provider for GrokBuildProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
+                display_name: None,
+                context_window: None,
                 model,
                 provider: "Grok Build".to_string(),
                 api_method: ROUTE_API_METHOD.to_string(),

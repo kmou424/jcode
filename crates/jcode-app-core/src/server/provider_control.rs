@@ -53,6 +53,9 @@ fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> Serve
     ServerEvent::AvailableModelsUpdated {
         provider_name: snapshot.provider_name,
         provider_model: snapshot.provider_model,
+        model_display_name: snapshot.model_display_name,
+        model_context_window: snapshot.model_context_window,
+        available_efforts: snapshot.available_efforts,
         available_models: snapshot.available_models,
         available_model_routes: snapshot.model_routes,
     }
@@ -382,6 +385,7 @@ fn send_model_changed_result(
         Option<String>,
     )>,
     fallback_model: String,
+    agent: &Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
@@ -397,6 +401,9 @@ fn send_model_changed_result(
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
                 id,
+                model_display_name: agent.model_display_name_for(&updated),
+                model_context_window: agent.provider_context_window_wire(),
+                available_efforts: agent.provider_available_efforts_wire(),
                 model: updated,
                 provider_name: Some(provider_name),
                 error: None,
@@ -415,6 +422,9 @@ fn send_model_changed_result(
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
                 id,
+                model_display_name: agent.model_display_name_for(&fallback_model),
+                model_context_window: agent.provider_context_window_wire(),
+                available_efforts: agent.provider_available_efforts_wire(),
                 model: fallback_model,
                 provider_name: None,
                 error: Some(error.to_string()),
@@ -435,6 +445,9 @@ fn apply_cycle_model(
     if models.is_empty() {
         let _ = client_event_tx.send(ServerEvent::ModelChanged {
             id,
+            model_display_name: agent.provider_model_display_name(),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
             model: agent.provider_model(),
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
@@ -477,7 +490,7 @@ fn apply_cycle_model(
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_cycle_model(
@@ -570,6 +583,28 @@ fn apply_set_model(
         ],
     );
 
+    if let Some(current) = model_switching_unavailable_current(agent) {
+        crate::logging::event_warn(
+            "server_set_model_unavailable",
+            vec![
+                ("id", id.to_string()),
+                ("requested_model", model.clone()),
+                ("current_model", current.clone()),
+            ],
+        );
+        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+            id,
+            model_display_name: agent.model_display_name_for(&current),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
+            model: current,
+            provider_name: None,
+            error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
+        });
+        return;
+    }
+
     let current = agent.provider_model();
     let result = {
         let result = agent.set_model(&model);
@@ -585,7 +620,7 @@ fn apply_set_model(
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 fn apply_set_route(
@@ -606,6 +641,29 @@ fn apply_set_route(
         ],
     );
 
+    if let Some(current) = model_switching_unavailable_current(agent) {
+        crate::logging::event_warn(
+            "server_set_route_unavailable",
+            vec![
+                ("id", id.to_string()),
+                ("requested_model", selection.model.clone()),
+                ("requested_provider", selection.provider_label.clone()),
+                ("current_model", current.clone()),
+            ],
+        );
+        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+            id,
+            model_display_name: agent.model_display_name_for(&current),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
+            model: current,
+            provider_name: None,
+            error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
+        });
+        return;
+    }
+
     let current = agent.provider_model();
     let result = {
         let result = agent.set_route_selection(&selection);
@@ -621,7 +679,7 @@ fn apply_set_route(
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_set_model(
