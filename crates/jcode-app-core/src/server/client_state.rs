@@ -68,7 +68,18 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
         "bedrock" => "Bedrock".to_string(),
         "antigravity" => "Antigravity".to_string(),
         "jcode" => "Jcode".to_string(),
-        other => other.to_string(),
+        other => {
+            // Named `[providers.<key>]` profiles may carry a display_name;
+            // prefer it over the raw profile key for history snapshots.
+            crate::config::config()
+                .providers
+                .get(other)
+                .and_then(|profile| profile.display_name.as_deref())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| other.to_string())
+        }
     };
 
     Some(label)
