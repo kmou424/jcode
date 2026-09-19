@@ -3553,9 +3553,9 @@ impl App {
                         changed = true;
                     }
                 }
-                StreamOp::CloseReasoning => {
+                StreamOp::CloseReasoning { duration_ms } => {
                     if self.reasoning_streaming {
-                        self.close_reasoning_region(None);
+                        self.close_reasoning_region(duration_ms.map(|ms| ms as f64 / 1000.0));
                         changed = true;
                     }
                 }
@@ -3564,14 +3564,16 @@ impl App {
         changed
     }
 
-    /// In `current` reasoning display mode, reasoning is shown live but collapsed
-    /// once the assistant commits a message or runs a tool. Strip any
-    /// reasoning-marked lines (identified by [`REASONING_SENTINEL`]) from text
-    /// about to be committed to the transcript. Other modes pass through.
+    /// In `current` and `compact` reasoning display modes, reasoning is shown
+    /// live but collapsed once the assistant commits a message or runs a tool.
+    /// Strip any reasoning-marked lines (identified by [`REASONING_SENTINEL`])
+    /// from text about to be committed to the transcript. Other modes pass
+    /// through.
     pub(super) fn collapse_reasoning_for_commit(&self, content: String) -> String {
         if !matches!(
             crate::config::config().display.reasoning_display(),
             crate::config::ReasoningDisplayMode::Current
+                | crate::config::ReasoningDisplayMode::Compact
         ) {
             return content;
         }

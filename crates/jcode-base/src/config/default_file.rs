@@ -163,11 +163,13 @@ usage_display = "left"
 # Show thinking/reasoning content (default: true)
 show_thinking = true
 
-# How to display reasoning/thinking content: "off", "full", or "current".
+# How to display reasoning/thinking content: "off", "full", "current", or "compact".
 #   off     - never show reasoning
 #   full    - keep every reasoning trace in the transcript
 #   current - show only the live reasoning; collapse it once the model commits
 #             an assistant message or runs a tool, then show the next one
+#   compact - Claude Code style: live "✻ thinking…" header + dim/italic
+#             reasoning; collapse to a one-line "✻ thought for Ns" trace
 # When unset, falls back to show_thinking (true => full, false => off).
 reasoning_display = "full"
 

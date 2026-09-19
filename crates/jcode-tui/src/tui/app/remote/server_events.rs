@@ -676,11 +676,22 @@ pub(in crate::tui::app) fn handle_server_event(
             app.last_stream_activity = Some(Instant::now());
             eager_stream_redraw
         }
-        ServerEvent::ReasoningDone { .. } => {
-            app.thinking_start = None;
+        ServerEvent::ReasoningDone { duration_secs } => {
+            // Preserve the reported thinking time (or the elapsed estimate
+            // from `thinking_start`) so `compact` reasoning display can render
+            // `✻ thought for Ns` when the queued region close lands.
+            app.reasoning_close_duration_secs = duration_secs.or_else(|| {
+                app.thinking_start
+                    .take()
+                    .map(|start| start.elapsed().as_secs_f64())
+            });
             // Queue the region close behind any still-buffered reasoning so it
-            // lands exactly after the final reasoning character reveals.
-            let ops = app.stream_buffer.push_close_reasoning();
+            // lands exactly after the final reasoning character reveals. The
+            // resolved duration rides with the marker so it reaches the compact
+            // summary intact no matter how long the backlog takes to reveal.
+            let ops = app
+                .stream_buffer
+                .push_close_reasoning(app.reasoning_close_duration_secs);
             app.apply_stream_ops(ops);
             eager_stream_redraw
         }
