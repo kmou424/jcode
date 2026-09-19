@@ -12,6 +12,7 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let key_b = BodyCacheKey {
         width: 41,
@@ -81,6 +82,7 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let resized_key = BodyCacheKey {
         messages_version: 2,
@@ -109,10 +111,11 @@ fn test_body_cache_state_evicts_oldest_entries() {
             centered: false,
             mermaid_aspect_bucket: None,
             pin_images: true,
-        inline_images_visible: true,
+            inline_images_visible: true,
             images_signature: (0, 0),
-        expanded_images_version: 0,
-        swarm_members_signature: 0,
+            expanded_images_version: 0,
+            swarm_members_signature: 0,
+            display_epoch: 0,
         };
         let prepared = Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from(format!("{idx}"))],
@@ -127,8 +130,8 @@ fn test_body_cache_state_evicts_oldest_entries() {
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
             copy_targets: Vec::new(),
-        message_boundaries: Vec::new(),
-        mermaid_pending_epoch: None,
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
         });
         cache.insert(key, prepared, idx, 0);
     }
@@ -154,6 +157,7 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let prepared = make_prepared_messages_with_content_bytes(3 * 1024 * 1024, "body-large-");
 
@@ -183,6 +187,7 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-");
 
@@ -213,6 +218,7 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let key_b = BodyCacheKey {
         width: 139,
@@ -250,6 +256,7 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let prepared = make_oversized_prepared_messages("body-oversized-base-");
 
@@ -486,10 +493,11 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         streaming_text_len: 0,
         streaming_text_hash: 0,
         batch_progress_hash: 0,
-    inline_images_signature: (0, 0),
+        inline_images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
-    inline_images_visible: true,
+        display_epoch: 0,
+        inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {
         width: 39,
@@ -563,6 +571,7 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         inline_images_visible: true,
         expanded_images_version: 0,
         swarm_members_signature: 0,
+        display_epoch: 0,
     };
     let resized_key = FullPrepCacheKey {
         mermaid_aspect_bucket: Some(2500),
@@ -593,10 +602,11 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             streaming_text_len: 0,
             streaming_text_hash: 0,
             batch_progress_hash: 0,
-        inline_images_signature: (0, 0),
-        expanded_images_version: 0,
-        swarm_members_signature: 0,
-        inline_images_visible: true,
+            inline_images_signature: (0, 0),
+            expanded_images_version: 0,
+            swarm_members_signature: 0,
+            display_epoch: 0,
+            inline_images_visible: true,
         };
         let prepared = make_prepared_chat_frame(Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from(format!("{idx}"))],
@@ -611,8 +621,8 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
             copy_targets: Vec::new(),
-        message_boundaries: Vec::new(),
-        mermaid_pending_epoch: None,
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
         }));
         cache.insert(key, prepared);
     }
@@ -638,10 +648,11 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         streaming_text_len: 0,
         streaming_text_hash: 0,
         batch_progress_hash: 0,
-    inline_images_signature: (0, 0),
+        inline_images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
-    inline_images_visible: true,
+        display_epoch: 0,
+        inline_images_visible: true,
     };
     let prepared = make_prepared_chat_frame_with_content_bytes(3 * 1024 * 1024, "full-large-");
 
@@ -670,10 +681,11 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         streaming_text_len: 4096,
         streaming_text_hash: 12345,
         batch_progress_hash: 0,
-    inline_images_signature: (0, 0),
+        inline_images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
-    inline_images_visible: true,
+        display_epoch: 0,
+        inline_images_visible: true,
     };
     let prepared = make_oversized_prepared_chat_frame("full-oversized-");
 
@@ -704,10 +716,11 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         streaming_text_len: 4096,
         streaming_text_hash: 12345,
         batch_progress_hash: 0,
-    inline_images_signature: (0, 0),
+        inline_images_signature: (0, 0),
         expanded_images_version: 0,
         swarm_members_signature: 0,
-    inline_images_visible: true,
+        display_epoch: 0,
+        inline_images_visible: true,
     };
     let key_b = FullPrepCacheKey {
         width: 139,
@@ -948,7 +961,10 @@ fn assert_prepared_equivalent(a: &PreparedMessages, b: &PreparedMessages, ctx: &
             x.abs_line_idx, y.abs_line_idx,
             "{ctx}: image_region abs_line_idx differ"
         );
-        assert_eq!(x.end_line, y.end_line, "{ctx}: image_region end_line differ");
+        assert_eq!(
+            x.end_line, y.end_line,
+            "{ctx}: image_region end_line differ"
+        );
     }
     assert_eq!(
         a.edit_tool_ranges.len(),
@@ -960,7 +976,10 @@ fn assert_prepared_equivalent(a: &PreparedMessages, b: &PreparedMessages, ctx: &
             x.start_line, y.start_line,
             "{ctx}: edit_tool_range start_line differ"
         );
-        assert_eq!(x.end_line, y.end_line, "{ctx}: edit_tool_range end_line differ");
+        assert_eq!(
+            x.end_line, y.end_line,
+            "{ctx}: edit_tool_range end_line differ"
+        );
     }
     assert_eq!(
         a.copy_targets.len(),
@@ -1000,7 +1019,9 @@ fn test_prefix_reuse_tail_edit_matches_full_build() {
     let base_state = TestState {
         display_messages: vec![
             DisplayMessage::user("first prompt"),
-            DisplayMessage::assistant("a fairly long answer that wraps across the width boundary here"),
+            DisplayMessage::assistant(
+                "a fairly long answer that wraps across the width boundary here",
+            ),
             DisplayMessage::user("second prompt"),
             DisplayMessage::assistant("partial"),
         ],
@@ -1011,17 +1032,20 @@ fn test_prefix_reuse_tail_edit_matches_full_build() {
     let edited_state = TestState {
         display_messages: vec![
             DisplayMessage::user("first prompt"),
-            DisplayMessage::assistant("a fairly long answer that wraps across the width boundary here"),
+            DisplayMessage::assistant(
+                "a fairly long answer that wraps across the width boundary here",
+            ),
             DisplayMessage::user("second prompt"),
-            DisplayMessage::assistant("partial answer is now complete and considerably longer than before"),
+            DisplayMessage::assistant(
+                "partial answer is now complete and considerably longer than before",
+            ),
         ],
         messages_version: 2,
         ..Default::default()
     };
 
     let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
-    let k =
-        super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
     assert_eq!(k, 3, "only the last message changed");
 
     let mut reuse = base;
@@ -1172,4 +1196,140 @@ fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
         std::env::remove_var("JCODE_PDFLATEX_COMMAND");
         std::env::remove_var("JCODE_PDFTOCAIRO_COMMAND");
     }
+}
+
+/// Regression: display toggles (bash/agentgrep output, tool details, diff mode,
+/// reasoning display, and any other `display.*` change picked up by a config
+/// reload) are baked into the body cache key via `display_epoch`. A body
+/// prepared under the old epoch must neither exact-hit nor serve as an
+/// incremental base - reusing its rendered prefix would re-emit the stale
+/// lines verbatim and the toggle would look ignored.
+#[test]
+fn test_body_cache_state_does_not_hit_or_reuse_across_display_epochs() {
+    let key = BodyCacheKey {
+        width: 80,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 7,
+        diagram_mode: crate::config::DiagramDisplayMode::None,
+        centered: false,
+        mermaid_aspect_bucket: None,
+        pin_images: true,
+        inline_images_visible: true,
+        images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        display_epoch: 1,
+    };
+    let toggled_key = BodyCacheKey {
+        display_epoch: 2,
+        ..key.clone()
+    };
+    let prepared = make_prepared_messages_with_content_bytes(64, "display-epoch-");
+
+    let mut cache = BodyCacheState::default();
+    cache.insert(key, prepared, 3, 0);
+
+    assert!(
+        cache.get_exact(&toggled_key).is_none(),
+        "a body baked under another display epoch must not exact-hit"
+    );
+    assert!(
+        cache.best_incremental_base(&toggled_key, 3).is_none(),
+        "a stale-epoch body must not be reused as an incremental base"
+    );
+    assert!(
+        cache.take_best_incremental_base(&toggled_key).is_none(),
+        "a stale-epoch body must not be taken as an incremental base"
+    );
+}
+
+#[test]
+fn test_body_cache_state_does_not_reuse_stale_oversized_epoch_base() {
+    // Same rejection must hold on the oversized lane: an epoch change discards
+    // oversized bases too, or a very large transcript keeps its stale render.
+    let key = BodyCacheKey {
+        width: 80,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 7,
+        diagram_mode: crate::config::DiagramDisplayMode::None,
+        centered: false,
+        mermaid_aspect_bucket: None,
+        pin_images: true,
+        inline_images_visible: true,
+        images_signature: (0, 0),
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        display_epoch: 1,
+    };
+    let toggled_key = BodyCacheKey {
+        display_epoch: 2,
+        ..key.clone()
+    };
+    let prepared = make_oversized_prepared_messages("display-epoch-oversized-");
+    assert!(estimate_prepared_messages_bytes(&prepared) > BODY_CACHE_MAX_BYTES);
+
+    let mut cache = BodyCacheState::default();
+    cache.insert(key, prepared, 3, 0);
+
+    assert!(
+        cache.get_exact(&toggled_key).is_none(),
+        "a stale-epoch oversized body must not exact-hit"
+    );
+    assert!(
+        cache.best_incremental_base(&toggled_key, 3).is_none(),
+        "a stale-epoch oversized body must not be reused as an incremental base"
+    );
+    assert!(
+        cache.take_best_incremental_base(&toggled_key).is_none(),
+        "a stale-epoch oversized body must not be taken as an incremental base"
+    );
+}
+
+#[test]
+fn test_full_prep_cache_state_does_not_hit_across_display_epochs() {
+    let key = FullPrepCacheKey {
+        width: 80,
+        height: 30,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 7,
+        diagram_mode: crate::config::DiagramDisplayMode::None,
+        centered: false,
+        mermaid_aspect_bucket: None,
+        is_processing: false,
+        streaming_text_len: 0,
+        streaming_text_hash: 0,
+        batch_progress_hash: 0,
+        inline_images_signature: (0, 0),
+        inline_images_visible: true,
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+        display_epoch: 1,
+    };
+    let toggled_key = FullPrepCacheKey {
+        display_epoch: 2,
+        ..key.clone()
+    };
+    let prepared = make_prepared_chat_frame_with_content_bytes(64, "display-epoch-");
+
+    let mut cache = FullPrepCacheState::default();
+    cache.insert(key, prepared);
+
+    assert!(
+        cache.get_exact(&toggled_key).is_none(),
+        "a prepared frame baked under another display epoch must not exact-hit"
+    );
+}
+
+#[test]
+fn test_display_epoch_changes_on_local_bump() {
+    // The epoch folds the config reload generation together with a local
+    // counter bumped by toggle mutations that bypass a config save, so either
+    // kind of change must move it.
+    let before = display_epoch();
+    bump_display_epoch();
+    assert_ne!(
+        display_epoch(),
+        before,
+        "bump_display_epoch must change the epoch read by cache keys"
+    );
 }

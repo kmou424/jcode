@@ -2273,6 +2273,7 @@ pub(super) fn handle_navigation_shortcuts(
 
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
+        crate::tui::ui::bump_display_epoch();
         if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
         }
@@ -2627,6 +2628,7 @@ pub(super) fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> boo
     }
 
     app.diff_mode = crate::config::DiffDisplayMode::FullInline;
+    crate::tui::ui::bump_display_epoch();
     app.record_copy_badge_key_press('e');
     app.copy_badge_ui.expand_feedback_until =
         Some(std::time::Instant::now() + std::time::Duration::from_millis(1100));
