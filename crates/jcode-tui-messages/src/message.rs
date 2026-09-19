@@ -205,9 +205,11 @@ impl DisplayMessage {
         }
     }
 
-    /// Create a display-only collapsing reasoning trace ("current" mode). The
-    /// content is sentinel-wrapped dim/italic markup; this message height-collapses
-    /// toward a one-line summary and is excluded from provider/model context.
+    /// Create a display-only reasoning trace (the ephemeral `current`/`compact`
+    /// reasoning-display modes). The content is sentinel-wrapped dim/italic
+    /// markup — the anchored reasoning block (`current`) or the one-line
+    /// `✻ thought for Ns` summary (`compact`) — and is excluded from
+    /// provider/model context.
     pub fn reasoning(content: impl Into<String>) -> Self {
         Self {
             role: "reasoning".to_string(),

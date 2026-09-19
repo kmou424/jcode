@@ -497,7 +497,6 @@ fn remote_reasoning_delta_burst_is_paced_not_dumped() {
     // nothing is ever buffered, so this must pin `Current` like its sibling
     // tests do.
     with_reasoning_current_home(|| {
-
         // A large provider reasoning burst must reveal over multiple paced frames
         // (via the segment-aware StreamBuffer), not pop in all at once. This is the
         // regression test for "reasoning mode feels choppy".
@@ -598,7 +597,11 @@ fn anchored_trace_survives_tool_commit_and_answer_commit() {
 
         // Tool-only commit (no streamed answer text).
         app.commit_pending_streaming_assistant_message();
-        assert_eq!(trace_count(&app), 1, "tool commit leaves the trace anchored");
+        assert_eq!(
+            trace_count(&app),
+            1,
+            "tool commit leaves the trace anchored"
+        );
 
         // Answer commit.
         app.append_streaming_text("the final answer");
@@ -609,8 +612,7 @@ fn anchored_trace_survives_tool_commit_and_answer_commit() {
             "answer commit leaves the trace anchored"
         );
         assert!(
-            !app
-                .display_messages
+            !app.display_messages
                 .iter()
                 .any(|m| m.role == "assistant" && m.content.contains("thought")),
             "no thought-summary residue may be committed"
@@ -748,7 +750,10 @@ fn repro_reasoning_rendered_then_removed_when_turn_ends_open() {
                 .contains(jcode_tui_markdown::REASONING_SENTINEL),
             "precondition: reasoning rendered live in the stream"
         );
-        assert!(app.reasoning_streaming, "region open: no ReasoningDone sent");
+        assert!(
+            app.reasoning_streaming,
+            "region open: no ReasoningDone sent"
+        );
 
         // Turn ends with the region still open (no ReasoningDone, no answer text).
         app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
@@ -912,8 +917,7 @@ fn replace_streaming_text_resets_reasoning_tail_and_never_panics_on_multibyte() 
     // characters, shorter than the recorded tail length.
     app.replace_streaming_text("\u{6f22}\u{5b57}\u{1f600}".to_string());
     assert_eq!(
-        app.reasoning_partial_len,
-        0,
+        app.reasoning_partial_len, 0,
         "replacing the stream must drop the stale reasoning tail length"
     );
 
@@ -955,7 +959,10 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
         // Used to panic inside `split_off`.
         app.anchor_current_reasoning_block();
         // Buffer is still valid UTF-8 and no character was cut in half.
-        assert!(app.streaming_text().is_char_boundary(app.streaming_text().len()));
+        assert!(
+            app.streaming_text()
+                .is_char_boundary(app.streaming_text().len())
+        );
     });
 }
 
@@ -979,13 +986,13 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
 fn reasoning_streaming_state_space_never_panics_or_desyncs() {
     // Multi-byte payloads: any off-by-one byte offset lands inside a character.
     const PAYLOADS: &[&str] = &[
-        "\u{6f22}\u{5b57}",             // 3-byte CJK
-        "\u{1f600}\u{1f601}",           // 4-byte emoji
-        "caf\u{e9} na\u{ef}ve",         // 2-byte accents
-        "a\u{6f22}b\u{1f600}c",         // mixed widths
-        "line one\nline two",           // newline commits a reasoning line
-        "",                             // empty delta
-        "   ",                          // whitespace-only
+        "\u{6f22}\u{5b57}",     // 3-byte CJK
+        "\u{1f600}\u{1f601}",   // 4-byte emoji
+        "caf\u{e9} na\u{ef}ve", // 2-byte accents
+        "a\u{6f22}b\u{1f600}c", // mixed widths
+        "line one\nline two",   // newline commits a reasoning line
+        "",                     // empty delta
+        "   ",                  // whitespace-only
     ];
 
     let mut app = create_test_app();
@@ -1049,4 +1056,265 @@ fn reasoning_streaming_state_space_never_panics_or_desyncs() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `compact` mode (Claude Code style): live `✻ thinking…` header + dim/italic
+// reasoning body while streaming; the whole block collapses to a one-line
+// `✻ thought for Ns` trace once it closes (tool call or answer commit).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compact_reasoning_live_shows_thinking_header_and_dim_italic_body() {
+    with_reasoning_compact_home(|| {
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+
+        app.open_reasoning_region();
+        app.append_reasoning_text("weighing the options\n");
+
+        // The live block opens with the Claude Code-style `✻ thinking…` header
+        // (lowercase, sentinel-wrapped like every reasoning line so it renders
+        // dim+italic and collapses with the rest of the block).
+        let streaming = app.streaming_text().to_string();
+        assert!(
+            streaming.contains(&format!("*{sentinel}✻ thinking…{sentinel}*")),
+            "compact mode must show the '✻ thinking…' header live: {streaming:?}"
+        );
+        assert!(
+            streaming.contains(&format!("*{sentinel}weighing the options{sentinel}*")),
+            "reasoning body stays dim+italic while streaming: {streaming:?}"
+        );
+    });
+}
+
+#[test]
+fn compact_reasoning_collapses_to_one_line_thought_summary() {
+    with_reasoning_compact_home(|| {
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+
+        app.reasoning_close_duration_secs = Some(3.6);
+        app.open_reasoning_region();
+        app.append_reasoning_text("weighing the options\nsecond thought\n");
+        app.close_reasoning_region(None);
+
+        // The whole block (header included) leaves the live stream and anchors
+        // as ONE `✻ thought for Ns` line — not the full body, and not the old
+        // `▸ thought for Xs` phrasing.
+        assert!(
+            app.streaming_text().is_empty(),
+            "collapsed block must leave the live stream: {:?}",
+            app.streaming_text()
+        );
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("collapsed compact block anchors a reasoning trace");
+        assert!(
+            anchored
+                .content
+                .contains(&format!("*{sentinel}✻ thought for 3.6s{sentinel}*")),
+            "one-line '✻ thought for N.Ns' trace (one decimal, rounded up): {:?}",
+            anchored.content
+        );
+        assert!(
+            !anchored.content.contains("weighing the options"),
+            "body text collapses away entirely: {:?}",
+            anchored.content
+        );
+        assert!(
+            !anchored.content.contains("✻ thinking…") && !anchored.content.contains('▸'),
+            "live header and old ▸ glyph must not survive the collapse: {:?}",
+            anchored.content
+        );
+        // Ephemeral like `current` mode: the trace is tracked for cleanup.
+        assert_eq!(
+            app.turn_reasoning_traces.len(),
+            1,
+            "compact trace tracked for next-prompt cleanup"
+        );
+    });
+}
+
+#[test]
+fn compact_reasoning_summary_falls_back_to_elapsed_thinking_time() {
+    with_reasoning_compact_home(|| {
+        let mut app = create_test_app();
+
+        // No ThinkingDone/ReasoningDone duration: the summary times the block
+        // from `thinking_start` (the ThinkingStart/first-delta timestamp).
+        app.thinking_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(3950));
+        app.open_reasoning_region();
+        app.append_reasoning_text("slow thinking\n");
+        app.close_reasoning_region(None);
+
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("collapsed compact block anchors a reasoning trace");
+        assert!(
+            anchored.content.contains("✻ thought for 4.0s"),
+            "elapsed fallback (ceil to 0.1s) must produce '✻ thought for 4.0s': {:?}",
+            anchored.content
+        );
+    });
+}
+
+#[test]
+fn compact_reasoning_preceded_by_answer_keeps_order() {
+    with_reasoning_compact_home(|| {
+        // Same in-place guarantee as `current` mode: answer text streamed
+        // *before* the block commits ahead of the collapsed trace.
+        let mut app = create_test_app();
+
+        app.append_streaming_text("Intro before thinking.");
+        app.open_reasoning_region();
+        app.append_reasoning_text("let me think\n");
+        app.close_reasoning_region(None);
+        app.append_streaming_text("Conclusion after thinking.");
+
+        let intro_idx = app
+            .display_messages
+            .iter()
+            .position(|m| m.role == "assistant" && m.content.contains("Intro before thinking."))
+            .expect("intro committed before the collapsed trace");
+        let trace_idx = app
+            .display_messages
+            .iter()
+            .position(|m| m.role == "reasoning")
+            .expect("trace anchored in the transcript");
+        assert!(
+            intro_idx < trace_idx,
+            "intro must precede the collapsed trace: {intro_idx} vs {trace_idx}"
+        );
+        assert!(
+            app.streaming_text().contains("Conclusion after thinking."),
+            "post-close answer keeps streaming live: {:?}",
+            app.streaming_text()
+        );
+    });
+}
+
+#[test]
+fn compact_reasoning_commit_strips_sentinel_lines() {
+    with_reasoning_compact_home(|| {
+        let app = create_test_app();
+
+        // Any sentinel-marked reasoning left in committed text (live header
+        // included) is stripped on commit, exactly like `current` mode.
+        let mut content = String::new();
+        content.push_str(&jcode_tui_markdown::reasoning_line_markup("✻ thinking…"));
+        content.push_str(&jcode_tui_markdown::reasoning_line_markup("a thought"));
+        content.push_str("the answer");
+        let stripped = app.collapse_reasoning_for_commit(content);
+        assert_eq!(stripped, "the answer", "got: {stripped:?}");
+    });
+}
+
+#[test]
+fn compact_traces_clear_on_next_prompt() {
+    with_reasoning_compact_home(|| {
+        let mut app = create_test_app();
+
+        app.open_reasoning_region();
+        app.append_reasoning_text("a thought\n");
+        app.close_reasoning_region(None);
+        assert_eq!(trace_count(&app), 1, "summary trace anchored");
+
+        app.clear_turn_reasoning_traces();
+        assert_eq!(
+            trace_count(&app),
+            0,
+            "compact summaries are ephemeral across turns, like `current`"
+        );
+    });
+}
+
+#[test]
+fn compact_remote_reasoning_done_uses_reported_duration() {
+    with_reasoning_compact_home(|| {
+        // The remote path reports the thinking duration on `ReasoningDone`;
+        // the collapsed summary must use it rather than wall-clock fallback.
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta {
+                text: "thinking hard\n".to_string(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDone {
+                duration_secs: Some(5.4),
+            },
+            &mut remote,
+        );
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
+
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("collapsed compact block anchors a reasoning trace");
+        assert!(
+            anchored.content.contains("✻ thought for 5.4s"),
+            "reported duration wins: {:?}",
+            anchored.content
+        );
+    });
+}
+
+#[test]
+fn compact_collapsed_trace_renders_one_dim_italic_line() {
+    with_reasoning_compact_home(|| {
+        use ratatui::style::Modifier;
+
+        let mut app = create_test_app();
+        app.reasoning_close_duration_secs = Some(2.0);
+        app.open_reasoning_region();
+        app.append_reasoning_text("a thought\n");
+        app.close_reasoning_region(None);
+
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("collapsed trace anchored");
+        let lines = crate::tui::markdown::render_markdown_with_width(&anchored.content, Some(80));
+        let visible: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        assert_eq!(
+            visible,
+            vec!["✻ thought for 2.0s".to_string()],
+            "collapsed compact trace must render as exactly one line: {visible:?}"
+        );
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref().contains("thought for"))
+            .expect("summary span");
+        assert!(
+            span.style.add_modifier.contains(Modifier::ITALIC),
+            "summary renders dim+italic: {:?}",
+            span.style
+        );
+    });
 }

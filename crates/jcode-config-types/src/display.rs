@@ -30,7 +30,7 @@ pub struct DisplayConfig {
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
-    /// How to display reasoning/thinking content (off/full/current).
+    /// How to display reasoning/thinking content (off/full/current/compact).
     /// When unset, falls back to `show_thinking` (true => full, false => off).
     #[serde(
         default,

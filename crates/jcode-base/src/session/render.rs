@@ -27,6 +27,10 @@ pub const DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES: usize = 64;
 /// - `Current`: only the *live* reasoning block is ever shown, so historical
 ///   reasoning is hidden on re-render (the live block already streamed and was
 ///   discarded once the model answered), matching the ephemeral live behavior.
+/// - `Compact`: collapsed traces are likewise session-ephemeral (the persisted
+///   block carries no thinking duration, so a faithful `✻ thought for Ns`
+///   summary cannot be rebuilt), so historical reasoning is hidden on
+///   re-render too.
 /// - `Full`: every reasoning line is shown (classic behavior).
 fn format_reasoning_markup(text: &str) -> String {
     if text.trim().is_empty() {
@@ -34,10 +38,13 @@ fn format_reasoning_markup(text: &str) -> String {
     }
     let mode = crate::config::config().display.reasoning_display();
     match mode {
-        // In both `Off` and `Current` modes persisted reasoning is not re-rendered:
-        // `Current` only ever shows the live block, which is discarded once the
-        // model answers, so reloaded history shows no past reasoning.
-        ReasoningDisplayMode::Off | ReasoningDisplayMode::Current => return String::new(),
+        // In `Off`, `Current`, and `Compact` modes persisted reasoning is not
+        // re-rendered: `Current`/`Compact` only ever show the live block, which
+        // is discarded once the model answers, so reloaded history shows no
+        // past reasoning.
+        ReasoningDisplayMode::Off
+        | ReasoningDisplayMode::Current
+        | ReasoningDisplayMode::Compact => return String::new(),
         ReasoningDisplayMode::Full => {}
     }
     let mut out = String::new();

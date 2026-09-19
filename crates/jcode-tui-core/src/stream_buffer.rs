@@ -65,19 +65,22 @@ pub enum StreamKind {
 /// A revealed operation, in arrival order. Callers apply these to the UI:
 /// `Text` appends answer text, `Reasoning` appends reasoning text, and
 /// `CloseReasoning` ends the live reasoning region (exactly after the final
-/// buffered reasoning character it followed).
+/// buffered reasoning character it followed). `duration_ms` optionally
+/// carries the measured thinking time reported alongside the close so the
+/// compact `thought for Ns` summary stays paired with its block even when
+/// the marker is queued behind a long paced backlog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamOp {
     Text(String),
     Reasoning(String),
-    CloseReasoning,
+    CloseReasoning { duration_ms: Option<u64> },
 }
 
 /// One queued backlog entry.
 #[derive(Debug)]
 enum QueuedOp {
     Chunk { kind: StreamKind, text: String },
-    CloseReasoning,
+    CloseReasoning { duration_ms: Option<u64> },
 }
 
 /// Buffer that accumulates streaming content and reveals it at a smooth, paced
@@ -141,7 +144,8 @@ impl StreamBuffer {
             return self.reveal_now(Instant::now());
         }
         if self.reasoning_open && !text.trim().is_empty() {
-            self.queue.push_back(QueuedOp::CloseReasoning);
+            self.queue
+                .push_back(QueuedOp::CloseReasoning { duration_ms: None });
             self.reasoning_open = false;
         }
         self.push_chunk(StreamKind::Text, text);
@@ -161,10 +165,14 @@ impl StreamBuffer {
 
     /// Queue a reasoning-region close marker (no-op when no reasoning is open in
     /// the backlog), returning any paced ops ready to apply now. The marker
-    /// reveals exactly after the final buffered reasoning character.
-    pub fn push_close_reasoning(&mut self) -> Vec<StreamOp> {
+    /// reveals exactly after the final buffered reasoning character. A known
+    /// thinking duration (provider-reported or measured) rides with the marker
+    /// so it reaches the close intact no matter how long the backlog takes.
+    pub fn push_close_reasoning(&mut self, duration_secs: Option<f64>) -> Vec<StreamOp> {
         if self.reasoning_open {
-            self.queue.push_back(QueuedOp::CloseReasoning);
+            self.queue.push_back(QueuedOp::CloseReasoning {
+                duration_ms: duration_secs.map(|secs| (secs.max(0.0) * 1000.0).round() as u64),
+            });
             self.reasoning_open = false;
         }
         self.reveal_now(Instant::now())
@@ -212,7 +220,7 @@ impl StreamBuffer {
             .iter()
             .map(|op| match op {
                 QueuedOp::Chunk { text, .. } => text.len(),
-                QueuedOp::CloseReasoning => 0,
+                QueuedOp::CloseReasoning { .. } => 0,
             })
             .sum();
         StreamBufferMemoryProfile {
@@ -305,9 +313,10 @@ impl StreamBuffer {
         loop {
             match self.queue.front_mut() {
                 None => break,
-                Some(QueuedOp::CloseReasoning) => {
+                Some(QueuedOp::CloseReasoning { duration_ms }) => {
+                    let duration_ms = *duration_ms;
                     self.queue.pop_front();
-                    ops.push(StreamOp::CloseReasoning);
+                    ops.push(StreamOp::CloseReasoning { duration_ms });
                 }
                 Some(QueuedOp::Chunk { kind, text }) => {
                     if char_count == 0 {
@@ -542,7 +551,7 @@ mod tests {
         ops.iter()
             .map(|op| match op {
                 StreamOp::Text(t) | StreamOp::Reasoning(t) => t.chars().count(),
-                StreamOp::CloseReasoning => 0,
+                StreamOp::CloseReasoning { .. } => 0,
             })
             .sum()
     }
@@ -574,7 +583,7 @@ mod tests {
             let (tag, text) = match op {
                 StreamOp::Text(t) => ('t', t),
                 StreamOp::Reasoning(t) => ('r', t),
-                StreamOp::CloseReasoning => ('c', String::new()),
+                StreamOp::CloseReasoning { .. } => ('c', String::new()),
             };
             if tag != 'c'
                 && let Some((last_tag, last_text)) = out.last_mut()
@@ -790,7 +799,7 @@ mod tests {
         let mut buf = StreamBuffer::new();
         let mut ops = Vec::new();
         ops.extend(buf.push_reasoning("think think"));
-        ops.extend(buf.push_close_reasoning());
+        ops.extend(buf.push_close_reasoning(None));
         ops.extend(buf.push_text("answer one"));
         ops.extend(buf.push_reasoning("more thinking"));
         ops.extend(buf.push_text("answer two"));
@@ -820,9 +829,11 @@ mod tests {
         buf.push_chunk(StreamKind::Reasoning, &"z".repeat(60));
         buf.reasoning_open = true;
         // Marker queued behind a large backlog: nothing closes yet.
-        let immediate = buf.push_close_reasoning();
+        let immediate = buf.push_close_reasoning(None);
         assert!(
-            !immediate.contains(&StreamOp::CloseReasoning),
+            !immediate
+                .iter()
+                .any(|op| matches!(op, StreamOp::CloseReasoning { .. })),
             "close must not jump ahead of buffered reasoning"
         );
         // Drain everything; the close marker must come after all reasoning chars.
@@ -837,7 +848,7 @@ mod tests {
         }
         let close_idx = all
             .iter()
-            .position(|op| matches!(op, StreamOp::CloseReasoning))
+            .position(|op| matches!(op, StreamOp::CloseReasoning { .. }))
             .expect("close marker must drain");
         assert_eq!(close_idx, all.len() - 1);
         let reasoning_chars: usize = all
@@ -859,7 +870,8 @@ mod tests {
         ops.extend(buf.push_reasoning(" still thinking"));
         ops.extend(buf.flush());
         assert!(
-            !ops.iter().any(|op| matches!(op, StreamOp::CloseReasoning)),
+            !ops.iter()
+                .any(|op| matches!(op, StreamOp::CloseReasoning { .. })),
             "whitespace-only text must not close the reasoning region: {ops:?}"
         );
     }
@@ -868,8 +880,8 @@ mod tests {
     fn marker_only_queue_emits_immediately() {
         let mut buf = StreamBuffer::new();
         buf.reasoning_open = true;
-        let ops = buf.push_close_reasoning();
-        assert_eq!(ops, vec![StreamOp::CloseReasoning]);
+        let ops = buf.push_close_reasoning(None);
+        assert_eq!(ops, vec![StreamOp::CloseReasoning { duration_ms: None }]);
         assert!(buf.is_empty());
     }
 
