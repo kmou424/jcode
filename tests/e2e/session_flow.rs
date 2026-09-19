@@ -289,7 +289,7 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
         let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
         match event {
             ServerEvent::Ack { .. } => continue,
-            ServerEvent::SessionId { session_id } => {
+            ServerEvent::SessionId { session_id, .. } => {
                 new_session_id = Some(session_id);
             }
             ServerEvent::Done { .. } if new_session_id.is_some() => break,

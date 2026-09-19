@@ -103,7 +103,12 @@ fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<Strin
 }
 
 /// A reattachment names an existing session, not a new client working directory.
-/// Resolve an omitted cwd before provisional initialization, never from the
+/// The session's stored project dir wins over whatever launch dir the client
+/// reported — resume restores the anchored dir, so a reconnect launched from
+/// elsewhere (e.g. an SSH bridge at login HOME) cannot re-key the provisional
+/// agent, swarm member, or MCP resolution to the wrong tree. Only a session
+/// with no stored dir at all (legacy) takes the client report as its anchor.
+/// Resolution runs before provisional initialization, never from the
 /// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
 async fn resolve_target_subscribe_working_dir(
     request: &mut Request,
@@ -118,9 +123,6 @@ async fn resolve_target_subscribe_working_dir(
     else {
         return Ok(());
     };
-    if working_dir.is_some() {
-        return Ok(());
-    }
     let live = sessions.read().await.get(target).cloned();
     let resolved = if let Some(live) = live {
         let idle_cwd = live
@@ -144,9 +146,16 @@ async fn resolve_target_subscribe_working_dir(
             .ok()
             .and_then(|session| session.working_dir)
     };
-    *working_dir = Some(resolved.ok_or_else(|| {
-        format!("Unknown session '{target}' or session has no working directory")
-    })?);
+    match resolved {
+        Some(dir) => *working_dir = Some(dir),
+        None => {
+            if working_dir.is_none() {
+                return Err(format!(
+                    "Unknown session '{target}' or session has no working directory"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -325,6 +325,11 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
 }
 
 fn validate_remote_working_dir(remote_working_dir: Option<&str>) -> Result<()> {
+    if remote_working_dir.is_some() {
+        output::stderr_info(
+            "\x1b[33m--remote-working-dir is deprecated; it still sets the remote launch dir for new sessions but will be removed — use /open to browse remote directories\x1b[0m",
+        );
+    }
     if let Some(remote_working_dir) = remote_working_dir
         && !remote_working_dir_is_absolute(remote_working_dir)
     {

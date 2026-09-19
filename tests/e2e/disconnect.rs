@@ -83,7 +83,7 @@ async fn abrupt_disconnect(turn: Turn, continue_on_disconnect: bool) -> Result<(
                 let mut line = String::new();
                 anyhow::ensure!(reader.read_line(&mut line).await? > 0, "unexpected EOF");
                 match serde_json::from_str::<ServerEvent>(&line)? {
-                    ServerEvent::SessionId { session_id: id } => session_id = Some(id),
+                    ServerEvent::SessionId { session_id: id, .. } => session_id = Some(id),
                     ServerEvent::Done { id: 1 } => break,
                     ServerEvent::Error { message, .. } => anyhow::bail!(message),
                     _ => {}
@@ -327,7 +327,7 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
         let session_id = events
             .iter()
             .find_map(|e| match e {
-                ServerEvent::SessionId { session_id } => Some(session_id.clone()),
+                ServerEvent::SessionId { session_id, .. } => Some(session_id.clone()),
                 _ => None,
             })
             .context("subscribe did not identify session")?;
@@ -553,7 +553,7 @@ async fn native_ping_ping_subscribe_history_keeps_one_socket() -> Result<()> {
         let session_id = events
             .iter()
             .find_map(|event| match event {
-                ServerEvent::SessionId { session_id } => Some(session_id.clone()),
+                ServerEvent::SessionId { session_id, .. } => Some(session_id.clone()),
                 _ => None,
             })
             .context("subscribe after capability probes must create a session")?;

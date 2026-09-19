@@ -137,7 +137,6 @@ pub(crate) fn resume_hint(session_id: &str) -> Option<String> {
     for (flag, variable) in [
         ("--ssh-binary", "JCODE_SSH_BINARY"),
         ("--ssh-server-socket", "JCODE_SSH_SERVER_SOCKET"),
-        ("--remote-working-dir", "JCODE_SSH_WORKING_DIR"),
     ] {
         if let Ok(value) = std::env::var(variable) {
             args.extend([flag.to_owned(), quote(&value)]);
@@ -206,8 +205,10 @@ mod tests {
         crate::env::set_var("JCODE_SSH_WORKING_DIR", "/srv/sam's repo");
         let hint = resume_hint("session_remote_1").unwrap();
         assert!(hint.contains("--ssh 'dev'"));
-        assert!(hint.contains("'/srv/sam'\\''s repo'"));
         assert!(hint.contains("--resume 'session_remote_1'"));
+        // A resume binds the session's stored remote dir, so the hint must
+        // not carry the deprecated --remote-working-dir flag.
+        assert!(!hint.contains("--remote-working-dir"));
         for (name, value) in names.into_iter().zip(previous) {
             match value {
                 Some(value) => crate::env::set_var(name, value),

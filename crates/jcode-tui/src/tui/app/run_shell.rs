@@ -771,7 +771,13 @@ impl App {
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
         if crate::tui::is_ssh_remote() {
-            self.session.working_dir = remote_working_dir.clone();
+            // Early display value until the SessionId event reports the real
+            // anchor: the handshake-resolved remote workspace (login HOME or
+            // the /open pick). A resumed session overwrites this with its
+            // stored project dir when the wire event arrives.
+            self.session.working_dir = remote_working_dir
+                .clone()
+                .or_else(|| std::env::var("JCODE_SSH_WORKING_DIR").ok());
         }
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();

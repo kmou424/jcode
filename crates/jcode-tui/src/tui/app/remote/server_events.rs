@@ -1433,10 +1433,45 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
-        ServerEvent::SessionId { session_id } => {
+        ServerEvent::SessionId {
+            session_id,
+            working_dir,
+        } => {
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
+            // The server reports the session's anchored working dir on the
+            // wire. Remote clients record it as the session's remote dir —
+            // the header, /open start, and remote session picker all consume
+            // it — but never chdir the local process. Local clients also
+            // re-pin the process cwd to the anchor (relative-path tools, file
+            // pickers, and shells stay consistent); when an older server omits
+            // the field they fall back to the local session store.
+            let anchor = working_dir
+                .map(|dir| dir.trim().to_string())
+                .filter(|dir| !dir.is_empty())
+                .or_else(|| {
+                    (!crate::tui::is_ssh_remote())
+                        .then(|| crate::session::Session::load(&session_id).ok())
+                        .flatten()
+                        .and_then(|session| session.working_dir)
+                        .map(|dir| dir.trim().to_string())
+                        .filter(|dir| !dir.is_empty())
+                });
+            if let Some(anchor) = anchor {
+                app.session.working_dir = Some(anchor.clone());
+                if !crate::tui::is_ssh_remote() {
+                    let already = std::env::current_dir()
+                        .map(|cwd| cwd == std::path::Path::new(&anchor))
+                        .unwrap_or(false);
+                    if !already && let Err(error) = std::env::set_current_dir(&anchor) {
+                        crate::logging::warn(&format!(
+                            "Could not switch client cwd to anchored session dir {}: {}",
+                            anchor, error
+                        ));
+                    }
+                }
+            }
             app.note_client_focus(true);
             app.update_terminal_title();
             false

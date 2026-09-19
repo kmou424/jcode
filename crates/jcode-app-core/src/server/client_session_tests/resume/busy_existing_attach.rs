@@ -197,7 +197,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     assert!(
         events.iter().any(|event| matches!(
             event,
-            ServerEvent::SessionId { session_id } if session_id == target_session_id
+            ServerEvent::SessionId { session_id, .. } if session_id == target_session_id
         )),
         "subscribe must report the bound session id so clients can reattach: {events:?}"
     );

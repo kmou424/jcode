@@ -3238,7 +3238,7 @@ fn emit_ndjson_event(
                 &serde_json::json!({ "type": "upstream_provider", "provider": provider }),
             )
         }
-        ServerEvent::SessionId { session_id } => {
+        ServerEvent::SessionId { session_id, .. } => {
             state.session_id = Some(session_id.clone());
             write_json_line(
                 stdout,

@@ -1103,7 +1103,14 @@ pub enum ServerEvent {
 
     /// Session ID assigned
     #[serde(rename = "session")]
-    SessionId { session_id: String },
+    SessionId {
+        session_id: String,
+        /// The session's anchored working dir on the server. Remote clients
+        /// learn the project dir from this — there is no local session file
+        /// to read it from. Older servers omit it; newer clients ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
 
     /// Server requests that this client/session close itself.
     #[serde(rename = "session_close_requested")]

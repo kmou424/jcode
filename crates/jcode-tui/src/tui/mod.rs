@@ -1795,8 +1795,16 @@ pub(crate) fn subscribe_metadata(
 ) -> (Option<String>, Option<bool>) {
     if is_ssh_remote() {
         // Never infer a remote project (or self-dev mode) from the laptop cwd.
+        // Report the remote workspace the bridge handshake resolved — the
+        // login HOME by default, or the /open pick — so a fresh session
+        // anchors there instead of staying unanchored.
+        let workspace = remote_working_dir
+            .map(str::to_string)
+            .or_else(|| std::env::var("JCODE_SSH_WORKING_DIR").ok())
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
         return (
-            remote_working_dir.map(str::to_string),
+            workspace,
             jcode_selfdev_types::client_selfdev_requested().then_some(true),
         );
     }
