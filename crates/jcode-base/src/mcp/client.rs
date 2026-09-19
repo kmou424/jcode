@@ -52,21 +52,30 @@ impl McpHandle {
         }
 
         let msg = serde_json::to_string(&request)? + "\n";
-        self.writer_tx
-            .send(msg)
-            .await
-            .context("Failed to send request")?;
+        if let Err(e) = self.writer_tx.send(msg).await {
+            // Remove the pending entry so it does not leak for the lifetime
+            // of the client.
+            self.pending.lock().await.remove(&id);
+            return Err(e).context("Failed to send request");
+        }
 
-        let response = tokio::time::timeout(self.request_timeout, rx)
-            .await
-            .with_context(|| {
-                format!(
+        let response = match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!("Channel closed");
+            }
+            Err(_) => {
+                // Timed out: the pending entry must be removed here or it
+                // leaks (and a late response would land in a dead entry).
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!(
                     "Request timeout after {}s (raise `timeout_secs` for MCP server '{}' if its tools legitimately run longer)",
                     self.request_timeout.as_secs(),
                     self.name
-                )
-            })?
-            .context("Channel closed")?;
+                );
+            }
+        };
 
         if let Some(err) = &response.error {
             anyhow::bail!("MCP error {}: {}", err.code, err.message);
@@ -116,6 +125,14 @@ impl McpHandle {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// True while the writer channel is open, i.e. the server process still
+    /// has a live stdin pipe. When the child dies the writer task exits and
+    /// the channel closes; a dead handle makes every call fail, so callers
+    /// should treat it as disconnected and reconnect.
+    pub fn is_alive(&self) -> bool {
+        !self.writer_tx.is_closed()
     }
 
     /// Refresh the list of available tools
@@ -351,6 +368,13 @@ impl McpClient {
             Ok(Some(_)) => false,
             Err(_) => false,
         }
+    }
+
+    /// Liveness check that does not need `&mut self`: true while the writer
+    /// task's channel is still open. A dead child closes stdin, which ends
+    /// the writer task and closes the channel.
+    pub fn is_alive(&self) -> bool {
+        self.handle.is_alive()
     }
 
     /// Shutdown the server
