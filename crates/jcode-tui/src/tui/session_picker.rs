@@ -1860,6 +1860,21 @@ impl SessionPicker {
                 continue;
             }
 
+            // Reasoning rows carry their data unconditionally; like the main
+            // transcript, `off` hides them entirely (before the separator) and
+            // every picked-session row is historical, so `current` hides them
+            // too. `compact` renders the `✻ thought for Ns` label, `full` the
+            // whole block.
+            if msg.role == "reasoning"
+                && matches!(
+                    super::ui::reasoning_display_mode(),
+                    crate::config::ReasoningDisplayMode::Off
+                        | crate::config::ReasoningDisplayMode::Current
+                )
+            {
+                continue;
+            }
+
             if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" {
                 lines.push(Line::from("").alignment(align));
             }
@@ -1868,12 +1883,23 @@ impl SessionPicker {
                 role: msg.role.clone(),
                 content: msg.content.clone(),
                 tool_calls: msg.tool_calls.clone(),
-                duration_secs: None,
+                duration_secs: msg.duration_secs.map(|secs| secs as f32),
                 title: None,
                 tool_data: msg.tool_data.clone(),
             };
 
             match msg.role.as_str() {
+                "reasoning" => {
+                    let md_lines = super::ui::render_reasoning_message(
+                        &display_msg,
+                        assistant_width,
+                        crate::config::DiffDisplayMode::Off,
+                    );
+                    for line in md_lines {
+                        lines.push(super::ui::align_if_unset(line, align));
+                        rendered_messages += 1;
+                    }
+                }
                 "user" => {
                     prompt_num += 1;
                     user_prompt_markers.push((

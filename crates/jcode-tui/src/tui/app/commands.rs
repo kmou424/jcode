@@ -1003,6 +1003,7 @@ fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
 
 fn apply_diff_mode(app: &mut App, mode: crate::config::DiffDisplayMode) {
     app.diff_mode = mode;
+    crate::tui::ui::bump_display_epoch();
     if !app.diff_pane_visible() {
         app.diff_pane_focus = false;
     }
@@ -2072,7 +2073,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 role: rendered.role,
                 content: rendered.content,
                 tool_calls: rendered.tool_calls,
-                duration_secs: None,
+                duration_secs: rendered.duration_secs.map(|secs| secs as f32),
                 title: None,
                 tool_data: rendered.tool_data,
             });
@@ -2153,7 +2154,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         role: rendered.role,
                         content: rendered.content,
                         tool_calls: rendered.tool_calls,
-                        duration_secs: None,
+                        duration_secs: rendered.duration_secs.map(|secs| secs as f32),
                         title: None,
                         tool_data: rendered.tool_data,
                     });
@@ -3033,6 +3034,7 @@ fn handle_tool_call_details_command(app: &mut App, trimmed: &str) -> bool {
         "Tool call details: {}",
         if enabled { "on" } else { "off" }
     ));
+    crate::tui::ui::bump_display_epoch();
     match crate::config::Config::set_tool_call_details(enabled) {
         Ok(()) => app.push_display_message(DisplayMessage::system(format!(
             "Saved tool call details: {}. Applied to this session immediately.",
@@ -3078,6 +3080,7 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
         "Show agentgrep output: {}",
         if enabled { "on" } else { "off" }
     ));
+    crate::tui::ui::bump_display_epoch();
     match crate::config::Config::set_show_agentgrep_output(enabled) {
         Ok(()) => app.push_display_message(DisplayMessage::system(format!(
             "Saved show agentgrep output: {}. Applied to this session immediately.",
@@ -3460,6 +3463,7 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     };
 
     app.set_status_notice(format!("Thinking display: {}", mode.label()));
+    crate::tui::ui::bump_display_epoch();
     match crate::config::Config::set_reasoning_display(mode) {
         Ok(()) => app.push_display_message(DisplayMessage::system(format!(
             "Saved thinking display: {}. Applied to this session immediately.",

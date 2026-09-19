@@ -419,6 +419,13 @@ pub trait TuiState {
     }
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
+    /// Whether the display-message index still belongs to the live turn's
+    /// anchored reasoning traces. `current` reasoning-display mode renders
+    /// only these; every other `reasoning` row is historical and hidden.
+    /// Defaults to `false` (nothing live) for test states.
+    fn reasoning_row_is_live(&self, _display_index: usize) -> bool {
+        false
+    }
     fn streaming_text(&self) -> &str;
     /// JSON payload for the pinned todo band rendered at the top of the chat
     /// viewport when `display.pin_todos` is enabled. `None` when the feature

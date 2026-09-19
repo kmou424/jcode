@@ -1,5 +1,5 @@
 use crate::DisplayMessage;
-use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode};
+use jcode_config_types::{DiagramDisplayMode, DiffDisplayMode, ReasoningDisplayMode};
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +18,8 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    reasoning_display: ReasoningDisplayMode,
+    display_epoch: u64,
 }
 
 #[derive(Default)]
@@ -69,6 +71,14 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    /// Effective reasoning display mode (off/full/current); rendered reasoning
+    /// and assistant content can change with it.
+    pub reasoning_display: ReasoningDisplayMode,
+    /// Display-toggle epoch: bumps on any transcript-affecting `display.*`
+    /// change (config save, config hot-reload, env override, or an explicit
+    /// session-scoped toggle bump) so a changed toggle re-renders history
+    /// instead of serving stale cached lines.
+    pub display_epoch: u64,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -120,6 +130,8 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        reasoning_display: context.reasoning_display,
+        display_epoch: context.display_epoch,
     };
 
     let mut cache = match message_cache().lock() {

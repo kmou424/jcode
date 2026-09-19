@@ -704,6 +704,7 @@ async fn handle_remote_key_internal(
 
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
+        crate::tui::ui::bump_display_epoch();
         if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
         }

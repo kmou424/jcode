@@ -253,6 +253,7 @@ pub fn push_reasoning_blocks(
     reasoning_content: &str,
     reasoning_signature: Option<&str>,
     store_replay_context: bool,
+    reasoning_duration_secs: Option<f64>,
 ) {
     if reasoning_content.is_empty() {
         return;
@@ -275,6 +276,7 @@ pub fn push_reasoning_blocks(
         } else {
             blocks.push(ContentBlock::Reasoning {
                 text: reasoning_content.to_string(),
+                duration_secs: reasoning_duration_secs,
             });
             readable_replay_stored = true;
         }
@@ -283,6 +285,7 @@ pub fn push_reasoning_blocks(
     if !readable_replay_stored {
         blocks.push(ContentBlock::ReasoningTrace {
             text: reasoning_content.to_string(),
+            duration_secs: reasoning_duration_secs,
         });
     }
 }

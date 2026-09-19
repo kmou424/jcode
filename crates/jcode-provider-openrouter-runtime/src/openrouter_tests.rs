@@ -685,6 +685,7 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
+                duration_secs: None,
             }],
             timestamp: None,
             tool_duration_ms: None,
@@ -777,6 +778,7 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
+                duration_secs: None,
             }],
             timestamp: None,
             tool_duration_ms: None,
@@ -968,6 +970,7 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
             content: vec![
                 ContentBlock::Reasoning {
                     text: "I should inspect the workspace first.".to_string(),
+                    duration_secs: None,
                 },
                 ContentBlock::ToolUse {
                     id: "call_1".to_string(),

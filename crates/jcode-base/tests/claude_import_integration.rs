@@ -70,7 +70,7 @@ fn all_text(session: &Session) -> String {
         .filter_map(|b| match b {
             ContentBlock::Text { text, .. } => Some(text.clone()),
             ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-            ContentBlock::Reasoning { text } => Some(text.clone()),
+            ContentBlock::Reasoning { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

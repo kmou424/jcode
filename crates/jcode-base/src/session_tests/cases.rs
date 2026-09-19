@@ -1547,24 +1547,25 @@ fn test_render_messages_renders_reasoning_before_answer_in_stored_order() {
             },
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two".to_string(),
+                duration_secs: None,
             },
         ],
     );
 
     let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
+    // Reasoning renders as its own `reasoning` row ahead of the answer text;
+    // the stored block order is [Text, ReasoningTrace] but the display order
+    // matches live streaming (reasoning first).
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "reasoning");
     let content = &rendered[0].content;
     assert!(
         content.contains(&format!("*{0}step one{0}*", REASONING_SENTINEL)),
         "expected reasoning markup, got: {content:?}"
     );
-    assert!(content.contains("Here is the answer."));
-    let reasoning_pos = content.find("step two").unwrap();
-    let answer_pos = content.find("Here is the answer.").unwrap();
-    assert!(
-        reasoning_pos < answer_pos,
-        "reasoning should precede the answer text even when stored after it: {content:?}"
-    );
+    assert!(content.contains("step two"));
+    assert_eq!(rendered[1].role, "assistant");
+    assert_eq!(rendered[1].content, "Here is the answer.");
 }
 
 #[test]
@@ -1586,6 +1587,7 @@ fn test_render_messages_renders_persisted_reasoning() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -1595,7 +1597,9 @@ fn test_render_messages_renders_persisted_reasoning() {
     );
 
     let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
+    // Reasoning emits as its own `reasoning` row before the answer row.
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "reasoning");
     let content = &rendered[0].content;
     // Reasoning lines are rendered as dim/italic markup with the sentinel.
     assert!(
@@ -1606,14 +1610,9 @@ fn test_render_messages_renders_persisted_reasoning() {
         content.contains(&format!("*{0}step two{0}*", REASONING_SENTINEL)),
         "expected reasoning markup, got: {content:?}"
     );
-    // Answer text follows the reasoning block.
-    assert!(content.contains("Here is the answer."));
-    let reasoning_end = content.find("step two").unwrap();
-    let answer_start = content.find("Here is the answer.").unwrap();
-    assert!(
-        reasoning_end < answer_start,
-        "reasoning should precede the answer text: {content:?}"
-    );
+    // The answer row follows the reasoning row.
+    assert_eq!(rendered[1].role, "assistant");
+    assert_eq!(rendered[1].content, "Here is the answer.");
 }
 
 #[test]
@@ -1634,6 +1633,7 @@ fn test_render_messages_renders_legacy_reasoning_variant() {
         Role::Assistant,
         vec![ContentBlock::Reasoning {
             text: "legacy thought".to_string(),
+            duration_secs: None,
         }],
     );
 
@@ -1649,7 +1649,7 @@ fn test_render_messages_renders_legacy_reasoning_variant() {
 }
 
 #[test]
-fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
+fn test_render_messages_emits_persisted_reasoning_row_in_current_mode() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
@@ -1667,6 +1667,7 @@ fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two\nstep three".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -1676,27 +1677,23 @@ fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
     );
 
     let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
+    // Persisted reasoning always emits a `reasoning` row at render time; the
+    // `current` display mode's hiding happens later, at render, where toggling
+    // the mode re-renders the same messages without rebuilding them.
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "reasoning");
     let content = &rendered[0].content;
-    // In `current` mode only the *live* reasoning block is ever shown; it streams
-    // then is discarded once the model answers. Re-rendered history therefore
-    // shows no past reasoning at all (no trace line, no lines, no sentinel).
     assert!(
-        !content.contains(REASONING_SENTINEL),
-        "no reasoning markup expected in current mode on reload: {content:?}"
+        content.contains(REASONING_SENTINEL) && content.contains("step one"),
+        "reasoning row must carry the persisted block regardless of mode: {content:?}"
     );
-    assert!(
-        !content.contains("step one")
-            && !content.contains("step two")
-            && !content.contains("thought"),
-        "individual reasoning lines/trace must not be replayed in current mode: {content:?}"
-    );
-    // The answer text is preserved.
-    assert!(content.contains("Here is the answer."));
+    // The answer text is preserved in its own row.
+    assert_eq!(rendered[1].role, "assistant");
+    assert_eq!(rendered[1].content, "Here is the answer.");
 }
 
 #[test]
-fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
+fn test_render_messages_emits_persisted_reasoning_row_in_off_mode() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
@@ -1714,6 +1711,7 @@ fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "secret thought".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -1723,13 +1721,19 @@ fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
     );
 
     let rendered = render_messages(&session);
-    assert_eq!(rendered.len(), 1);
-    let content = &rendered[0].content;
+    // `off` hides the reasoning row at render time, not here: the stored block
+    // is emitted unconditionally so a mode toggle can re-render it.
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "reasoning");
     assert!(
-        !content.contains(REASONING_SENTINEL) && !content.contains("secret thought"),
-        "reasoning must be hidden entirely in off mode: {content:?}"
+        rendered[0]
+            .content
+            .contains(&format!("*{0}secret thought{0}*", REASONING_SENTINEL)),
+        "reasoning row carries the persisted block regardless of mode: {:?}",
+        rendered[0].content
     );
-    assert!(content.contains("Here is the answer."));
+    assert_eq!(rendered[1].role, "assistant");
+    assert_eq!(rendered[1].content, "Here is the answer.");
 }
 
 #[test]
@@ -2176,6 +2180,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
         content: vec![
             ContentBlock::ReasoningTrace {
                 text: "step 1: consider the run loop ordering".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is my answer.".to_string(),
@@ -2207,7 +2212,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let has_trace = assistant.content.iter().any(|b| {
         matches!(
             b,
-            ContentBlock::ReasoningTrace { text }
+            ContentBlock::ReasoningTrace { text, .. }
                 if text == "step 1: consider the run loop ordering"
         )
     });

@@ -399,6 +399,7 @@ fn convert_content_blocks(content: &ClaudeCodeContent) -> Vec<ContentBlock> {
                 ClaudeCodeContentBlock::Thinking { thinking, .. } => {
                     Some(ContentBlock::Reasoning {
                         text: thinking.clone(),
+                        duration_secs: None,
                     })
                 }
                 ClaudeCodeContentBlock::ToolUse { id, name, input } => {

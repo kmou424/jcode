@@ -114,87 +114,93 @@ fn reasoning_region_closes_before_normal_output() {
 
 #[test]
 fn reasoning_region_open_is_idempotent() {
-    let mut app = create_test_app();
+    with_reasoning_current_home(|| {
+        let mut app = create_test_app();
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("a\n");
-    app.open_reasoning_region(); // no-op while open
-    app.append_reasoning_text("b\n");
+        app.open_reasoning_region();
+        app.append_reasoning_text("a\n");
+        app.open_reasoning_region(); // no-op while open
+        app.append_reasoning_text("b\n");
 
-    let text = app.streaming_text();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
-    assert!(
-        text.contains(&format!("*{sentinel}a{sentinel}*")),
-        "first chunk: {text:?}"
-    );
-    assert!(
-        text.contains(&format!("*{sentinel}b{sentinel}*")),
-        "second chunk: {text:?}"
-    );
-    // No extra separator burst between the two chunks.
-    assert!(
-        !text.contains(&format!("*{sentinel}a{sentinel}*\n\n")),
-        "second chunk should not restart the region: {text:?}"
-    );
+        let text = app.streaming_text();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+        assert!(
+            text.contains(&format!("*{sentinel}a{sentinel}*")),
+            "first chunk: {text:?}"
+        );
+        assert!(
+            text.contains(&format!("*{sentinel}b{sentinel}*")),
+            "second chunk: {text:?}"
+        );
+        // No extra separator burst between the two chunks.
+        assert!(
+            !text.contains(&format!("*{sentinel}a{sentinel}*\n\n")),
+            "second chunk should not restart the region: {text:?}"
+        );
+    });
 }
 
 #[test]
 fn reasoning_line_split_across_deltas_stays_one_run() {
-    let mut app = create_test_app();
+    with_reasoning_current_home(|| {
+        let mut app = create_test_app();
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("one ");
-    app.append_reasoning_text("two\n");
+        app.open_reasoning_region();
+        app.append_reasoning_text("one ");
+        app.append_reasoning_text("two\n");
 
-    // While streaming live, the split-across-deltas line is a single emphasis run.
-    let content = app.streaming_text();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
-    assert!(
-        content.contains(&format!("*{sentinel}one two{sentinel}*")),
-        "split line must be one emphasis run: {content:?}"
-    );
+        // While streaming live, the split-across-deltas line is a single emphasis run.
+        let content = app.streaming_text();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+        assert!(
+            content.contains(&format!("*{sentinel}one two{sentinel}*")),
+            "split line must be one emphasis run: {content:?}"
+        );
+    });
 }
 
 #[test]
 fn reasoning_region_renders_dim_italic_text_without_gutter() {
-    use ratatui::style::Modifier;
+    with_reasoning_current_home(|| {
+        use ratatui::style::Modifier;
 
-    let mut app = create_test_app();
+        let mut app = create_test_app();
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("considering options\n");
+        app.open_reasoning_region();
+        app.append_reasoning_text("considering options\n");
 
-    // The live reasoning renders dim+italic from the streaming buffer.
-    let reasoning_content = app.streaming_text().to_string();
+        // The live reasoning renders dim+italic from the streaming buffer.
+        let reasoning_content = app.streaming_text().to_string();
 
-    let lines = crate::tui::markdown::render_markdown_with_width(&reasoning_content, Some(80));
-    let body = lines
-        .iter()
-        .find(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.content.as_ref().contains("considering options"))
-        })
-        .expect("reasoning body line present");
+        let lines = crate::tui::markdown::render_markdown_with_width(&reasoning_content, Some(80));
+        let body = lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.as_ref().contains("considering options"))
+            })
+            .expect("reasoning body line present");
 
-    let rendered: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
-    // No blockquote gutter, and the sentinel is stripped from the visible text.
-    assert!(!rendered.contains('│'), "no gutter expected: {rendered:?}");
-    assert!(
-        !rendered.contains(jcode_tui_markdown::REASONING_SENTINEL),
-        "sentinel must be stripped: {rendered:?}"
-    );
+        let rendered: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
+        // No blockquote gutter, and the sentinel is stripped from the visible text.
+        assert!(!rendered.contains('│'), "no gutter expected: {rendered:?}");
+        assert!(
+            !rendered.contains(jcode_tui_markdown::REASONING_SENTINEL),
+            "sentinel must be stripped: {rendered:?}"
+        );
 
-    let body_span = body
-        .spans
-        .iter()
-        .find(|s| s.content.as_ref().contains("considering options"))
-        .expect("body span present");
-    assert!(
-        body_span.style.add_modifier.contains(Modifier::ITALIC),
-        "reasoning body should be italic: {:?}",
-        body_span.style
-    );
+        let body_span = body
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("considering options"))
+            .expect("body span present");
+        assert!(
+            body_span.style.add_modifier.contains(Modifier::ITALIC),
+            "reasoning body should be italic: {:?}",
+            body_span.style
+        );
+    });
 }
 
 #[test]
@@ -226,78 +232,84 @@ fn strip_reasoning_lines_reasoning_only_becomes_empty() {
 
 #[test]
 fn reasoning_partial_line_renders_live_before_newline() {
-    // The in-progress line (no trailing newline) must render immediately as a
-    // dim+italic partial tail so reasoning streams token-by-token.
-    let mut app = create_test_app();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    with_reasoning_current_home(|| {
+        // The in-progress line (no trailing newline) must render immediately as a
+        // dim+italic partial tail so reasoning streams token-by-token.
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("partial thou");
+        app.open_reasoning_region();
+        app.append_reasoning_text("partial thou");
 
-    let text = app.streaming_text();
-    assert!(
-        text.contains(&format!("*{sentinel}partial thou{sentinel}*")),
-        "partial line should render live: {text:?}"
-    );
+        let text = app.streaming_text();
+        assert!(
+            text.contains(&format!("*{sentinel}partial thou{sentinel}*")),
+            "partial line should render live: {text:?}"
+        );
+    });
 }
 
 #[test]
 fn reasoning_partial_tail_grows_in_place_without_duplication() {
-    // Successive deltas of the same line replace the live tail (truncate + rebuild)
-    // rather than appending duplicate fragments.
-    let mut app = create_test_app();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    with_reasoning_current_home(|| {
+        // Successive deltas of the same line replace the live tail (truncate + rebuild)
+        // rather than appending duplicate fragments.
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("one ");
-    app.append_reasoning_text("two ");
-    app.append_reasoning_text("three");
+        app.open_reasoning_region();
+        app.append_reasoning_text("one ");
+        app.append_reasoning_text("two ");
+        app.append_reasoning_text("three");
 
-    let text = app.streaming_text();
-    assert!(
-        text.contains(&format!("*{sentinel}one two three{sentinel}*")),
-        "tail should grow in place: {text:?}"
-    );
-    // The earlier partial fragments must not linger as separate runs.
-    assert!(
-        !text.contains(&format!("*{sentinel}one {sentinel}*")),
-        "stale partial tail should be replaced, not duplicated: {text:?}"
-    );
-    assert_eq!(
-        text.matches(sentinel).count(),
-        2,
-        "exactly one live emphasis run (two sentinels) expected: {text:?}"
-    );
+        let text = app.streaming_text();
+        assert!(
+            text.contains(&format!("*{sentinel}one two three{sentinel}*")),
+            "tail should grow in place: {text:?}"
+        );
+        // The earlier partial fragments must not linger as separate runs.
+        assert!(
+            !text.contains(&format!("*{sentinel}one {sentinel}*")),
+            "stale partial tail should be replaced, not duplicated: {text:?}"
+        );
+        assert_eq!(
+            text.matches(sentinel).count(),
+            2,
+            "exactly one live emphasis run (two sentinels) expected: {text:?}"
+        );
+    });
 }
 
 #[test]
 fn reasoning_partial_promotes_to_committed_line_on_newline() {
-    // When the newline arrives, the live tail becomes a committed line and a fresh
-    // (empty) tail follows; no duplicate copies of the completed line remain.
-    let mut app = create_test_app();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    with_reasoning_current_home(|| {
+        // When the newline arrives, the live tail becomes a committed line and a fresh
+        // (empty) tail follows; no duplicate copies of the completed line remain.
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("growing line");
-    app.append_reasoning_text("\nnext");
+        app.open_reasoning_region();
+        app.append_reasoning_text("growing line");
+        app.append_reasoning_text("\nnext");
 
-    let text = app.streaming_text();
-    // Committed first line (hard-break terminated) and a live second-line tail.
-    assert!(
-        text.contains(&format!("*{sentinel}growing line{sentinel}*  \n")),
-        "first line should be committed with a hard break: {text:?}"
-    );
-    assert!(
-        text.contains(&format!("*{sentinel}next{sentinel}*")),
-        "second line should render live: {text:?}"
-    );
-    // The completed line must appear exactly once (no partial+committed duplication).
-    assert_eq!(
-        text.matches(&format!("*{sentinel}growing line{sentinel}*"))
-            .count(),
-        1,
-        "completed line must not be duplicated: {text:?}"
-    );
+        let text = app.streaming_text();
+        // Committed first line (hard-break terminated) and a live second-line tail.
+        assert!(
+            text.contains(&format!("*{sentinel}growing line{sentinel}*  \n")),
+            "first line should be committed with a hard break: {text:?}"
+        );
+        assert!(
+            text.contains(&format!("*{sentinel}next{sentinel}*")),
+            "second line should render live: {text:?}"
+        );
+        // The completed line must appear exactly once (no partial+committed duplication).
+        assert_eq!(
+            text.matches(&format!("*{sentinel}growing line{sentinel}*"))
+                .count(),
+            1,
+            "completed line must not be duplicated: {text:?}"
+        );
+    });
 }
 
 #[test]
@@ -419,15 +431,21 @@ fn multiple_reasoning_blocks_anchor_in_order_and_clear_next_prompt() {
             app.streaming_text()
         );
 
-        // The next prompt removes the turn's traces (ephemeral across turns).
+        // The next prompt drops live-turn membership (which hides the rows under
+        // `current`) but never removes the anchored rows: they carry the data
+        // `full`/`compact` modes render.
         app.clear_turn_reasoning_traces();
+        assert!(
+            app.turn_reasoning_traces.is_empty(),
+            "next prompt drops the turn's live membership"
+        );
         assert_eq!(
             app.display_messages
                 .iter()
                 .filter(|m| m.role == "reasoning")
                 .count(),
-            0,
-            "next prompt clears the turn's anchored traces"
+            2,
+            "reasoning rows are permanent transcript data, not removed"
         );
         assert!(
             app.display_messages
@@ -478,14 +496,20 @@ fn anchored_trace_never_moves_and_clears_on_next_prompt() {
             "anchored trace content unchanged"
         );
 
-        // Next prompt clears all of the turn's traces.
+        // Next prompt drops live-turn membership; the anchored rows themselves
+        // stay in the transcript (they carry the data `full`/`compact` render).
         app.clear_turn_reasoning_traces();
+        assert!(
+            app.turn_reasoning_traces.is_empty(),
+            "live membership dropped on next prompt"
+        );
         assert_eq!(
             app.display_messages
                 .iter()
                 .filter(|m| m.role == "reasoning")
                 .count(),
-            0
+            2,
+            "reasoning rows are permanent data, never removed"
         );
     });
 }
@@ -534,47 +558,49 @@ fn remote_reasoning_delta_burst_is_paced_not_dumped() {
 
 #[test]
 fn remote_reasoning_then_text_preserves_order_through_paced_buffer() {
-    // Interleaved reasoning -> answer must reveal in arrival order even though
-    // both kinds now share one paced backlog: the reasoning region closes after
-    // the last buffered reasoning char and before the first answer char.
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
+    with_reasoning_current_home(|| {
+        // Interleaved reasoning -> answer must reveal in arrival order even though
+        // both kinds now share one paced backlog: the reasoning region closes after
+        // the last buffered reasoning char and before the first answer char.
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ReasoningDelta {
-            text: "thinking hard about this problem\n".to_string(),
-        },
-        &mut remote,
-    );
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ReasoningDone {
-            duration_secs: None,
-        },
-        &mut remote,
-    );
-    app.handle_server_event(
-        crate::protocol::ServerEvent::TextDelta {
-            text: "The answer is 42.".to_string(),
-        },
-        &mut remote,
-    );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta {
+                text: "thinking hard about this problem\n".to_string(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDone {
+                duration_secs: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TextDelta {
+                text: "The answer is 42.".to_string(),
+            },
+            &mut remote,
+        );
 
-    // Drain whatever is still paced.
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
+        // Drain whatever is still paced.
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
 
-    // The reasoning region must be closed (current mode discards/retains it) and
-    // the answer text must be present, unstyled, after it.
-    assert!(!app.reasoning_streaming, "region must close before answer");
-    let text = app.streaming_text();
-    assert!(
-        text.contains("The answer is 42."),
-        "answer must reveal after reasoning: {text:?}"
-    );
+        // The reasoning region must be closed (current mode discards/retains it) and
+        // the answer text must be present, unstyled, after it.
+        assert!(!app.reasoning_streaming, "region must close before answer");
+        let text = app.streaming_text();
+        assert!(
+            text.contains("The answer is 42."),
+            "answer must reveal after reasoning: {text:?}"
+        );
+    });
 }
 
 #[test]
@@ -662,12 +688,26 @@ fn gc_dissolves_stale_traces_only_when_provably_offscreen() {
         // Transcript hasn't grown enough yet: 25 - 10 = 15 <= 20 + 2 margin.
         crate::tui::ui::set_last_total_wrapped_lines(25);
         assert!(!app.gc_offscreen_reasoning_traces());
-        assert_eq!(trace_count(&app), 2, "no GC while possibly on screen");
+        assert_eq!(
+            app.turn_reasoning_traces.len(),
+            2,
+            "no GC while possibly on screen"
+        );
 
         // Transcript grew a viewport past the first anchor: 40 - 10 = 30 > 22.
         crate::tui::ui::set_last_total_wrapped_lines(40);
         assert!(app.gc_offscreen_reasoning_traces());
-        assert_eq!(trace_count(&app), 1, "stale off-screen trace dissolved");
+        assert_eq!(
+            app.turn_reasoning_traces.len(),
+            1,
+            "stale off-screen trace loses live membership"
+        );
+        // The row itself is permanent data: GC only releases live membership.
+        assert_eq!(
+            trace_count(&app),
+            2,
+            "reasoning rows are never physically removed"
+        );
         assert!(
             app.display_messages
                 .iter()
@@ -703,15 +743,15 @@ fn gc_never_runs_while_user_scrolled_up() {
         );
         crate::tui::ui::set_last_total_wrapped_lines(200);
 
-        // Scrolled up: the user may be reading the old trace; never remove it.
+        // Scrolled up: the user may be reading the old trace; never drop it.
         app.auto_scroll_paused = true;
         assert!(!app.gc_offscreen_reasoning_traces());
-        assert_eq!(trace_count(&app), 2);
+        assert_eq!(app.turn_reasoning_traces.len(), 2);
 
         // Back at the tail: GC may proceed.
         app.auto_scroll_paused = false;
         assert!(app.gc_offscreen_reasoning_traces());
-        assert_eq!(trace_count(&app), 1);
+        assert_eq!(app.turn_reasoning_traces.len(), 1);
     });
 }
 
@@ -853,42 +893,48 @@ fn gc_keeps_single_trace_indefinitely() {
         );
         crate::tui::ui::set_last_total_wrapped_lines(500);
         assert!(!app.gc_offscreen_reasoning_traces());
-        assert_eq!(trace_count(&app), 1, "the current thought is never GC'd");
+        assert_eq!(
+            app.turn_reasoning_traces.len(),
+            1,
+            "the current thought keeps its live membership"
+        );
     });
 }
 
 #[test]
 fn answer_text_appended_into_open_region_does_not_glue_next_reasoning() {
-    // Regression: if answer text is appended while a reasoning region is still
-    // open (a stale `reasoning_streaming` flag), the next reasoning chunk must
-    // still be separated from the answer tail. Previously the answer ran
-    // straight into the reasoning run with no break (e.g.
-    // `...patch + build.Ah, I see what's happening now.`).
-    let mut app = create_test_app();
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    with_reasoning_current_home(|| {
+        // Regression: if answer text is appended while a reasoning region is still
+        // open (a stale `reasoning_streaming` flag), the next reasoning chunk must
+        // still be separated from the answer tail. Previously the answer ran
+        // straight into the reasoning run with no break (e.g.
+        // `...patch + build.Ah, I see what's happening now.`).
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
 
-    app.open_reasoning_region();
-    app.append_reasoning_text("first thinking\n");
-    // Append real answer text directly (this path does not go through the close
-    // marker), leaving the region flagged open if the invariant is not enforced.
-    app.append_streaming_text("Say the word and I'll patch + build.");
-    // Appending real answer text must have closed the open reasoning region so a
-    // later `open_reasoning_region` re-inserts its separator.
-    assert!(
-        !app.reasoning_streaming,
-        "appending real answer text must close the open reasoning region"
-    );
-    // More reasoning arrives (opens a fresh region).
-    app.append_reasoning_text("Ah, I see what's happening now.");
+        app.open_reasoning_region();
+        app.append_reasoning_text("first thinking\n");
+        // Append real answer text directly (this path does not go through the close
+        // marker), leaving the region flagged open if the invariant is not enforced.
+        app.append_streaming_text("Say the word and I'll patch + build.");
+        // Appending real answer text must have closed the open reasoning region so a
+        // later `open_reasoning_region` re-inserts its separator.
+        assert!(
+            !app.reasoning_streaming,
+            "appending real answer text must close the open reasoning region"
+        );
+        // More reasoning arrives (opens a fresh region).
+        app.append_reasoning_text("Ah, I see what's happening now.");
 
-    let text = app.streaming_text();
-    // The answer tail must be separated from the next reasoning run: there must
-    // not be answer text immediately followed by the opening reasoning emphasis.
-    let glued = format!("build.*{sentinel}");
-    assert!(
-        !text.contains(&glued),
-        "answer text must not be glued onto reasoning: {text:?}"
-    );
+        let text = app.streaming_text();
+        // The answer tail must be separated from the next reasoning run: there must
+        // not be answer text immediately followed by the opening reasoning emphasis.
+        let glued = format!("build.*{sentinel}");
+        assert!(
+            !text.contains(&glued),
+            "answer text must not be glued onto reasoning: {text:?}"
+        );
+    });
 }
 
 /// Regression test for issues #632/#633/#635: a hard panic
@@ -903,29 +949,31 @@ fn answer_text_appended_into_open_region_does_not_glue_next_reasoning() {
 /// `String::truncate` panics, killing the whole process.
 #[test]
 fn replace_streaming_text_resets_reasoning_tail_and_never_panics_on_multibyte() {
-    let mut app = create_test_app();
+    with_reasoning_current_home(|| {
+        let mut app = create_test_app();
 
-    // Stream a reasoning tail so `reasoning_partial_len` is non-zero.
-    app.open_reasoning_region();
-    app.append_reasoning_text("thinking about the problem");
-    assert!(
-        app.reasoning_partial_len > 0,
-        "expected a live reasoning tail to be recorded"
-    );
+        // Stream a reasoning tail so `reasoning_partial_len` is non-zero.
+        app.open_reasoning_region();
+        app.append_reasoning_text("thinking about the problem");
+        assert!(
+            app.reasoning_partial_len > 0,
+            "expected a live reasoning tail to be recorded"
+        );
 
-    // A reconnect/resume replaces the buffer with a snapshot made of multi-byte
-    // characters, shorter than the recorded tail length.
-    app.replace_streaming_text("\u{6f22}\u{5b57}\u{1f600}".to_string());
-    assert_eq!(
-        app.reasoning_partial_len, 0,
-        "replacing the stream must drop the stale reasoning tail length"
-    );
+        // A reconnect/resume replaces the buffer with a snapshot made of multi-byte
+        // characters, shorter than the recorded tail length.
+        app.replace_streaming_text("\u{6f22}\u{5b57}\u{1f600}".to_string());
+        assert_eq!(
+            app.reasoning_partial_len, 0,
+            "replacing the stream must drop the stale reasoning tail length"
+        );
 
-    // Any subsequent reasoning delta strips the tail first. This is the call
-    // that used to panic.
-    app.append_reasoning_text("more thought");
-    // Buffer is still valid UTF-8 and the process survived.
-    assert!(app.streaming_text().contains("more thought"));
+        // Any subsequent reasoning delta strips the tail first. This is the call
+        // that used to panic.
+        app.append_reasoning_text("more thought");
+        // Buffer is still valid UTF-8 and the process survived.
+        assert!(app.streaming_text().contains("more thought"));
+    });
 }
 
 /// Directly exercise the boundary-safe truncation: even if a tail length is
@@ -946,9 +994,11 @@ fn strip_reasoning_partial_tail_snaps_to_char_boundary() {
 /// Sibling of the `strip_reasoning_partial_tail` hazard: `reasoning_block_start`
 /// is also a byte offset recorded against an earlier state of the buffer, and
 /// `split_off` panics on a non-boundary offset just like `truncate` does.
-/// Clamping to the length alone does not prevent landing mid-character.
+/// Clamping to the length alone does not prevent landing mid-character. The
+/// slice lives in `close_reasoning_region` now (block data is anchored, not
+/// dropped), so that is the entry point this test exercises.
 #[test]
-fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
+fn close_reasoning_region_snaps_block_start_to_char_boundary() {
     with_reasoning_current_home(|| {
         let mut app = create_test_app();
         // Two 3-byte characters.
@@ -957,7 +1007,7 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
         app.reasoning_block_start = Some(4);
         app.reasoning_streaming = true;
         // Used to panic inside `split_off`.
-        app.anchor_current_reasoning_block();
+        app.close_reasoning_region(None);
         // Buffer is still valid UTF-8 and no character was cut in half.
         assert!(
             app.streaming_text()
@@ -984,78 +1034,80 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
 /// of panicking.
 #[test]
 fn reasoning_streaming_state_space_never_panics_or_desyncs() {
-    // Multi-byte payloads: any off-by-one byte offset lands inside a character.
-    const PAYLOADS: &[&str] = &[
-        "\u{6f22}\u{5b57}",     // 3-byte CJK
-        "\u{1f600}\u{1f601}",   // 4-byte emoji
-        "caf\u{e9} na\u{ef}ve", // 2-byte accents
-        "a\u{6f22}b\u{1f600}c", // mixed widths
-        "line one\nline two",   // newline commits a reasoning line
-        "",                     // empty delta
-        "   ",                  // whitespace-only
-    ];
+    with_reasoning_current_home(|| {
+        // Multi-byte payloads: any off-by-one byte offset lands inside a character.
+        const PAYLOADS: &[&str] = &[
+            "\u{6f22}\u{5b57}",     // 3-byte CJK
+            "\u{1f600}\u{1f601}",   // 4-byte emoji
+            "caf\u{e9} na\u{ef}ve", // 2-byte accents
+            "a\u{6f22}b\u{1f600}c", // mixed widths
+            "line one\nline two",   // newline commits a reasoning line
+            "",                     // empty delta
+            "   ",                  // whitespace-only
+        ];
 
-    let mut app = create_test_app();
-    // xorshift keeps this deterministic: a failure is always reproducible.
-    let mut rng: u64 = 0x9E3779B97F4A7C15;
-    let mut next = move || {
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
-        rng
-    };
+        let mut app = create_test_app();
+        // xorshift keeps this deterministic: a failure is always reproducible.
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
 
-    for step in 0..4000u32 {
-        let payload = PAYLOADS[(next() % PAYLOADS.len() as u64) as usize];
-        match next() % 7 {
-            0 => app.open_reasoning_region(),
-            1 => app.append_reasoning_text(payload),
-            2 => app.close_reasoning_region(None),
-            3 => app.append_streaming_text(payload),
-            // The operation that caused the real bug: swap the buffer while an
-            // offset into the previous buffer may still be recorded.
-            4 => app.replace_streaming_text(payload.to_string()),
-            5 => {
-                let _ = app.take_streaming_text();
+        for step in 0..4000u32 {
+            let payload = PAYLOADS[(next() % PAYLOADS.len() as u64) as usize];
+            match next() % 7 {
+                0 => app.open_reasoning_region(),
+                1 => app.append_reasoning_text(payload),
+                2 => app.close_reasoning_region(None),
+                3 => app.append_streaming_text(payload),
+                // The operation that caused the real bug: swap the buffer while an
+                // offset into the previous buffer may still be recorded.
+                4 => app.replace_streaming_text(payload.to_string()),
+                5 => {
+                    let _ = app.take_streaming_text();
+                }
+                _ => app.strip_reasoning_partial_tail(),
             }
-            _ => app.strip_reasoning_partial_tail(),
-        }
 
-        // Invariant 1: the buffer is always valid UTF-8 at a character boundary.
-        let text = app.streaming_text();
-        assert!(
-            text.is_char_boundary(text.len()),
-            "step {step}: streaming_text ended mid-character"
-        );
-        // Invariant 2: the recorded tail can never claim more bytes than exist,
-        // which is what made `len() - partial_len` land at a bogus offset.
-        assert!(
-            app.reasoning_partial_len <= text.len(),
-            "step {step}: reasoning_partial_len {} exceeds buffer len {}",
-            app.reasoning_partial_len,
-            text.len()
-        );
-        // Invariant 2b: the tail must describe the *current* buffer, not a
-        // previous one. The slice point it implies has to be a real character
-        // boundary on its own merits. Without this, a stale length survives a
-        // buffer swap and is only rescued by the defensive snap downstream,
-        // which hides the desync instead of preventing it.
-        let implied = text.len() - app.reasoning_partial_len;
-        assert!(
-            text.is_char_boundary(implied),
-            "step {step}: tail len {} implies non-boundary slice at {implied} in {text:?}",
-            app.reasoning_partial_len
-        );
-        // Invariant 3: a recorded block start must be a real boundary in the
-        // current buffer, since `anchor_current_reasoning_block` splits there.
-        if let Some(start) = app.reasoning_block_start {
+            // Invariant 1: the buffer is always valid UTF-8 at a character boundary.
+            let text = app.streaming_text();
             assert!(
-                start <= text.len(),
-                "step {step}: reasoning_block_start {start} exceeds buffer len {}",
+                text.is_char_boundary(text.len()),
+                "step {step}: streaming_text ended mid-character"
+            );
+            // Invariant 2: the recorded tail can never claim more bytes than exist,
+            // which is what made `len() - partial_len` land at a bogus offset.
+            assert!(
+                app.reasoning_partial_len <= text.len(),
+                "step {step}: reasoning_partial_len {} exceeds buffer len {}",
+                app.reasoning_partial_len,
                 text.len()
             );
+            // Invariant 2b: the tail must describe the *current* buffer, not a
+            // previous one. The slice point it implies has to be a real character
+            // boundary on its own merits. Without this, a stale length survives a
+            // buffer swap and is only rescued by the defensive snap downstream,
+            // which hides the desync instead of preventing it.
+            let implied = text.len() - app.reasoning_partial_len;
+            assert!(
+                text.is_char_boundary(implied),
+                "step {step}: tail len {} implies non-boundary slice at {implied} in {text:?}",
+                app.reasoning_partial_len
+            );
+            // Invariant 3: a recorded block start must be a real boundary in the
+            // current buffer, since `anchor_current_reasoning_block` splits there.
+            if let Some(start) = app.reasoning_block_start {
+                assert!(
+                    start <= text.len(),
+                    "step {step}: reasoning_block_start {start} exceeds buffer len {}",
+                    text.len()
+                );
+            }
         }
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,7 +1141,7 @@ fn compact_reasoning_live_shows_thinking_header_and_dim_italic_body() {
 }
 
 #[test]
-fn compact_reasoning_collapses_to_one_line_thought_summary() {
+fn compact_reasoning_close_anchors_full_block_with_duration() {
     with_reasoning_compact_home(|| {
         let mut app = create_test_app();
         let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
@@ -1099,41 +1151,50 @@ fn compact_reasoning_collapses_to_one_line_thought_summary() {
         app.append_reasoning_text("weighing the options\nsecond thought\n");
         app.close_reasoning_region(None);
 
-        // The whole block (header included) leaves the live stream and anchors
-        // as ONE `✻ thought for Ns` line — not the full body, and not the old
-        // `▸ thought for Xs` phrasing.
+        // The whole block (live `✻ thinking…` header included) leaves the
+        // stream and anchors as a `reasoning` row carrying the FULL
+        // sentinel-wrapped body plus the measured duration. Collapsing to the
+        // one-line `✻ thought for Ns` label happens at render time off the
+        // *current* mode, so a later toggle reveals the same data.
         assert!(
             app.streaming_text().is_empty(),
-            "collapsed block must leave the live stream: {:?}",
+            "closed block must leave the live stream: {:?}",
             app.streaming_text()
         );
         let anchored = app
             .display_messages
             .iter()
             .find(|m| m.role == "reasoning")
-            .expect("collapsed compact block anchors a reasoning trace");
+            .expect("closed compact block anchors a reasoning row");
         assert!(
             anchored
                 .content
-                .contains(&format!("*{sentinel}✻ thought for 3.6s{sentinel}*")),
-            "one-line '✻ thought for N.Ns' trace (one decimal, rounded up): {:?}",
+                .contains(&format!("*{sentinel}weighing the options{sentinel}*")),
+            "full body markup is the stored data: {:?}",
             anchored.content
         );
         assert!(
-            !anchored.content.contains("weighing the options"),
-            "body text collapses away entirely: {:?}",
+            anchored
+                .content
+                .contains(&format!("*{sentinel}second thought{sentinel}*")),
+            "every reasoning line is captured: {:?}",
             anchored.content
+        );
+        assert_eq!(
+            anchored.duration_secs,
+            Some(3.6),
+            "measured duration rides along for the compact label"
         );
         assert!(
-            !anchored.content.contains("✻ thinking…") && !anchored.content.contains('▸'),
-            "live header and old ▸ glyph must not survive the collapse: {:?}",
+            !anchored.content.contains("✻ thinking…"),
+            "live-only header must be stripped from the stored block: {:?}",
             anchored.content
         );
-        // Ephemeral like `current` mode: the trace is tracked for cleanup.
+        // Live-turn membership registered so `current` mode treats it as live.
         assert_eq!(
             app.turn_reasoning_traces.len(),
             1,
-            "compact trace tracked for next-prompt cleanup"
+            "closed block registers in turn_reasoning_traces"
         );
     });
 }
@@ -1143,7 +1204,7 @@ fn compact_reasoning_summary_falls_back_to_elapsed_thinking_time() {
     with_reasoning_compact_home(|| {
         let mut app = create_test_app();
 
-        // No ThinkingDone/ReasoningDone duration: the summary times the block
+        // No ThinkingDone/ReasoningDone duration: the row times the block
         // from `thinking_start` (the ThinkingStart/first-delta timestamp).
         app.thinking_start =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(3950));
@@ -1155,11 +1216,11 @@ fn compact_reasoning_summary_falls_back_to_elapsed_thinking_time() {
             .display_messages
             .iter()
             .find(|m| m.role == "reasoning")
-            .expect("collapsed compact block anchors a reasoning trace");
+            .expect("closed compact block anchors a reasoning row");
         assert!(
-            anchored.content.contains("✻ thought for 4.0s"),
-            "elapsed fallback (ceil to 0.1s) must produce '✻ thought for 4.0s': {:?}",
-            anchored.content
+            matches!(anchored.duration_secs, Some(s) if (3.9..4.6).contains(&s)),
+            "elapsed fallback stores the wall-clock duration: {:?}",
+            anchored.duration_secs
         );
     });
 }
@@ -1223,13 +1284,19 @@ fn compact_traces_clear_on_next_prompt() {
         app.open_reasoning_region();
         app.append_reasoning_text("a thought\n");
         app.close_reasoning_region(None);
-        assert_eq!(trace_count(&app), 1, "summary trace anchored");
+        assert_eq!(trace_count(&app), 1, "reasoning row anchored");
 
+        // Like `current`, live membership ends on the next prompt — but the row
+        // stays: it is the data `compact`/`full` render.
         app.clear_turn_reasoning_traces();
+        assert!(
+            app.turn_reasoning_traces.is_empty(),
+            "live membership ends across turns"
+        );
         assert_eq!(
             trace_count(&app),
-            0,
-            "compact summaries are ephemeral across turns, like `current`"
+            1,
+            "the anchored row is permanent transcript data"
         );
     });
 }
@@ -1265,17 +1332,18 @@ fn compact_remote_reasoning_done_uses_reported_duration() {
             .display_messages
             .iter()
             .find(|m| m.role == "reasoning")
-            .expect("collapsed compact block anchors a reasoning trace");
-        assert!(
-            anchored.content.contains("✻ thought for 5.4s"),
-            "reported duration wins: {:?}",
-            anchored.content
+            .expect("closed compact block anchors a reasoning row");
+        assert_eq!(
+            anchored.duration_secs,
+            Some(5.4),
+            "reported duration wins over wall-clock: {:?}",
+            anchored.duration_secs
         );
     });
 }
 
 #[test]
-fn compact_collapsed_trace_renders_one_dim_italic_line() {
+fn compact_reasoning_row_renders_one_dim_italic_line() {
     with_reasoning_compact_home(|| {
         use ratatui::style::Modifier;
 
@@ -1289,8 +1357,15 @@ fn compact_collapsed_trace_renders_one_dim_italic_line() {
             .display_messages
             .iter()
             .find(|m| m.role == "reasoning")
-            .expect("collapsed trace anchored");
-        let lines = crate::tui::markdown::render_markdown_with_width(&anchored.content, Some(80));
+            .expect("closed block anchored")
+            .clone();
+        // Render-time gate: under `compact` the full-body row collapses to the
+        // one-line `✻ thought for Ns` label.
+        let lines = crate::tui::ui::render_reasoning_message(
+            &anchored,
+            80,
+            crate::config::DiffDisplayMode::default(),
+        );
         let visible: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1299,7 +1374,8 @@ fn compact_collapsed_trace_renders_one_dim_italic_line() {
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
             })
-            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .collect();
         assert_eq!(
             visible,
@@ -1315,6 +1391,134 @@ fn compact_collapsed_trace_renders_one_dim_italic_line() {
             span.style.add_modifier.contains(Modifier::ITALIC),
             "summary renders dim+italic: {:?}",
             span.style
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Mode-agnostic capture: reasoning rows always carry the full sentinel-wrapped
+// block plus the measured duration, no matter which mode streamed them. The
+// *current* `reasoning_display` mode gates visibility at render time, so
+// toggling re-renders the same captured history.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn off_mode_streams_nothing_but_still_anchors_full_block() {
+    with_reasoning_off_home(|| {
+        let mut app = create_test_app();
+        let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+
+        app.open_reasoning_region();
+        app.append_reasoning_text("silent thinking\n");
+        app.close_reasoning_region(Some(1.2));
+
+        // Nothing was ever emitted into the live stream.
+        assert!(
+            app.streaming_text().is_empty(),
+            "off mode never writes to the live stream: {:?}",
+            app.streaming_text()
+        );
+        // ...and no stale offsets are claimed against it.
+        assert!(app.reasoning_block_start.is_none());
+        assert_eq!(app.reasoning_partial_len, 0);
+
+        // The block still anchors a data-complete row (markup + duration) so a
+        // later mode toggle can render it.
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("off-mode close still anchors a reasoning row");
+        assert!(
+            anchored
+                .content
+                .contains(&format!("*{sentinel}silent thinking{sentinel}*")),
+            "hidden accumulation becomes full markup at close: {:?}",
+            anchored.content
+        );
+        assert_eq!(anchored.duration_secs, Some(1.2));
+        assert_eq!(app.turn_reasoning_traces.len(), 1);
+    });
+}
+
+#[test]
+fn mid_block_toggle_merges_hidden_and_streamed_text_in_order() {
+    // Start hidden (`off`), flip to `current` mid-block: the text captured
+    // while hidden and the text streamed while visible must merge into one
+    // anchored block, in arrival order.
+    with_reasoning_off_home(|| {
+        let mut app = create_test_app();
+        app.open_reasoning_region();
+        app.append_reasoning_text("hidden half\n");
+
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Current)
+            .expect("toggle mid-block");
+        crate::config::invalidate_config_cache();
+        app.append_reasoning_text("visible half\n");
+        app.close_reasoning_region(None);
+
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("block anchors on close");
+        let hidden = anchored.content.find("hidden half").unwrap();
+        let visible = anchored.content.find("visible half").unwrap();
+        assert!(
+            hidden < visible,
+            "pre-toggle text precedes post-toggle text: {:?}",
+            anchored.content
+        );
+    });
+}
+
+#[test]
+fn reasoning_row_rerenders_across_mode_toggles() {
+    // The stored row is one piece of data; render_reasoning_message projects it
+    // per the *current* mode — full markup under `full`, the `✻ thought for
+    // Ns` label under `compact`.
+    with_reasoning_full_home(|| {
+        let mut app = create_test_app();
+        app.reasoning_close_duration_secs = Some(2.5);
+        app.open_reasoning_region();
+        app.append_reasoning_text("captured thought\n");
+        app.close_reasoning_region(None);
+        let anchored = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "reasoning")
+            .expect("row anchored")
+            .clone();
+
+        let render = |mode: crate::config::ReasoningDisplayMode| {
+            crate::config::Config::set_reasoning_display(mode).expect("set mode");
+            crate::config::invalidate_config_cache();
+            let lines = crate::tui::ui::render_reasoning_message(
+                &anchored,
+                80,
+                crate::config::DiffDisplayMode::default(),
+            );
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .map(|s| s.content.as_ref().to_string())
+                .collect::<String>()
+        };
+
+        let full = render(crate::config::ReasoningDisplayMode::Full);
+        assert!(
+            full.contains("captured thought"),
+            "full mode renders the captured body: {full:?}"
+        );
+
+        let compact = render(crate::config::ReasoningDisplayMode::Compact);
+        assert!(
+            compact.contains("✻ thought for 2.5s"),
+            "compact mode renders the one-line label: {compact:?}"
+        );
+        assert!(
+            !compact.contains("captured thought"),
+            "compact hides the body: {compact:?}"
         );
     });
 }
