@@ -35,11 +35,11 @@ pub(crate) struct Args {
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
-    /// Working directory for the local client process
+    /// Working directory for the local client process; a new session anchors here. Ignored when resuming — resume switches the process cwd to the session's anchored directory.
     #[arg(short = 'C', long, global = true)]
     pub(crate) cwd: Option<String>,
 
-    /// Working directory to send to a remote server when using --socket
+    /// DEPRECATED: use /open to browse remote directories. Still sets the remote launch dir for new sessions over --socket/--ssh; will be removed.
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,
 
