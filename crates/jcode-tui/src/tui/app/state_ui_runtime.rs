@@ -87,6 +87,23 @@ impl App {
         skills.list().iter().map(|s| s.name.clone()).collect()
     }
 
+    /// Description to show for a skill in `/` candidates and `/help`.
+    /// SSH sessions resolve it through `remote_skill_infos` (sideband
+    /// metadata); local sessions read the live registry. Anything without
+    /// metadata returns `None` so callers can fall back to "Activate skill".
+    pub(super) fn skill_description_for_display(&self, name: &str) -> Option<String> {
+        if crate::tui::is_ssh_remote() || self.is_remote {
+            return self
+                .remote_skill_infos
+                .iter()
+                .find(|info| info.name == name)
+                .and_then(|info| (!info.description.is_empty()).then(|| info.description.clone()));
+        }
+        self.current_skills_snapshot()
+            .get(name)
+            .and_then(|skill| (!skill.description.is_empty()).then(|| skill.description.clone()))
+    }
+
     pub fn queued_count(&self) -> usize {
         self.queued_messages.len() + self.hidden_queued_system_messages.len()
     }

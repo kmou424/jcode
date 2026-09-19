@@ -417,6 +417,22 @@ pub(super) struct RemoteResumeActivity {
     pub current_tool_name: Option<String>,
 }
 
+/// A remote file request queued for the remote poll loop to send.
+#[derive(Clone, Debug)]
+pub(super) enum PendingRemoteFileRequest {
+    Read { path: String, op: RemoteFileReadOp },
+    Write { path: String, content: String },
+}
+
+/// Identifies the flow an in-flight `read_file` reply belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemoteFileReadOp {
+    /// `/swarm-prompt`: probing `<cwd>/.jcode/swarm-prompt.md`.
+    SwarmPromptProject,
+    /// `/swarm-prompt`: probing `~/.jcode/swarm-prompt.md`.
+    SwarmPromptGlobal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PendingReloadReconnectStatus {
     AwaitingHistory { session_id: Option<String> },
@@ -663,7 +679,7 @@ pub(super) struct OvernightAutoPokeState {
 
 #[derive(Clone, Debug, Default)]
 struct CommandCandidatesCache {
-    candidates: Vec<(String, &'static str)>,
+    candidates: Vec<(String, String)>,
 }
 
 /// Memoized result of [`App::command_suggestions`] for one exact input buffer.
@@ -688,7 +704,7 @@ struct CommandSuggestionsCache {
     /// memo is deliberately scoped to a single frame: it collapses the ~8
     /// reads per frame into one computation and never survives into the next.
     epoch: u64,
-    suggestions: Vec<(String, &'static str)>,
+    suggestions: Vec<(String, String)>,
 }
 
 /// Non-input state that [`App::command_suggestions`] branches on before it
@@ -1201,6 +1217,12 @@ pub struct App {
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,
+    // Skill display metadata (description + remote path) sent alongside
+    // `remote_skills`; empty on pre-skill-metadata daemons.
+    remote_skill_infos: Vec<jcode_app_core::ssh_ops::SshSkillInfo>,
+    /// SSH mode: a History payload landed and the `list_skills` sideband op
+    /// should refresh `remote_skill_infos` on the next remote poll.
+    pending_remote_skill_infos: bool,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)
@@ -1661,6 +1683,44 @@ pub struct App {
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,
     pending_session_picker_load: Option<PendingSessionPickerLoad>,
+    /// SSH mode: the remote picker was opened and the client still owes the
+    /// daemon a `list_sessions` request (drained on the remote poll loop).
+    pending_remote_session_list: bool,
+    /// SSH mode: `/todos` asked the remote daemon for the session's todo
+    /// items (drained on the remote poll loop; the reply arrives as a
+    /// `get_todos` sideband reply and renders the card).
+    pending_remote_todos_request: bool,
+    /// SSH mode: `/config edit` asked the remote loop to send a `read_config`
+    /// request so the raw remote `config.toml` (comments included) can be
+    /// round-tripped through the local `$EDITOR`.
+    pending_remote_config_edit_request: bool,
+    /// SSH mode: request id of the in-flight `read_config` issued for
+    /// `/config edit`; the matching sideband reply opens the editor.
+    awaiting_remote_config_edit: Option<u64>,
+    /// SSH mode: a History payload landed and the `read_config` sideband op
+    /// should seed the process-wide remote config override.
+    pending_remote_config_seed: bool,
+    /// SSH mode: request id of the in-flight `read_config` seeding the
+    /// remote config override; the matching reply installs the override.
+    awaiting_remote_config_seed: Option<u64>,
+    /// SSH mode: remote file requests queued by UI code and drained on the
+    /// remote poll loop (`read_file`/`write_file`/`list_path`).
+    pending_remote_file_requests: std::collections::VecDeque<PendingRemoteFileRequest>,
+    /// SSH mode: in-flight `read_file` request ids mapped to the flow that
+    /// continues when the sideband reply lands.
+    remote_file_read_ops: std::collections::HashMap<u64, RemoteFileReadOp>,
+    /// SSH mode: newest `@` path-completion prefix awaiting a `list_path`
+    /// send. Replaced on each keystroke so bursts collapse to one request.
+    pending_remote_path_completion: Option<String>,
+    /// SSH mode: in-flight `list_path` request id for `@` completion; only a
+    /// reply matching this id (and the still-current composer token) is used.
+    remote_path_completion_id: Option<u64>,
+    /// SSH mode: `/catchup next` asked for a remote session list and should
+    /// resume the first catchup candidate once it lands.
+    pending_catchup_next: bool,
+    /// SSH mode: catchup candidates stashed from the most recent remote
+    /// `SessionList` event so `/catchup next` can skip a re-fetch.
+    remote_catchup_candidates: Vec<String>,
     catchup_return_stack: Vec<String>,
     pending_catchup_resume: Option<PendingCatchupResume>,
     in_flight_catchup_resume: Option<PendingCatchupResume>,

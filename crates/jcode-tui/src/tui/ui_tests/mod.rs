@@ -252,7 +252,7 @@ impl crate::tui::TuiState for TestState {
     fn status(&self) -> ProcessingStatus {
         self.status.clone()
     }
-    fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+    fn command_suggestions(&self) -> Vec<(String, String)> {
         Vec::new()
     }
     fn active_skill(&self) -> Option<String> {

@@ -929,7 +929,7 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
 
 fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
     let status = crate::auth::AuthStatus::check();
-    let cfg = crate::config::Config::load();
+    let cfg = crate::config::config();
     let Some(provider) = resolve_account_provider_descriptor(provider_id) else {
         return format!("Unknown provider {}.", provider_id);
     };

@@ -118,7 +118,7 @@ fn command_suggestions_overlay_rect(
 }
 
 /// Whether the command palette is active for the current composer state.
-fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
+fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, String)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
@@ -255,7 +255,7 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
 
 fn command_suggestion_lines(
     app: &dyn TuiState,
-    suggestions: &[(String, &'static str)],
+    suggestions: &[(String, String)],
 ) -> Vec<Line<'static>> {
     // Highlight the characters of each command that the typed query matched.
     // We only highlight the command token itself (the part before the first

@@ -11,6 +11,7 @@ use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
 use anyhow::Result;
+use jcode_app_core::ssh_ops::{self, SshOp, SshOpRequest, SshOpResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -211,6 +212,10 @@ pub enum RemoteDisconnectReason {
 pub enum RemoteRead {
     Event(ServerEvent),
     Disconnected(RemoteDisconnectReason),
+    /// A sideband client-op reply emitted by the SSH stdio bridge.
+    /// Op replies are not daemon events; they answer `send_sideband_op`
+    /// calls and arrive interleaved on the same stream.
+    OpReply(Box<SshOpResponse>),
 }
 
 /// Classification of a single decoded protocol line read from the server
@@ -218,6 +223,7 @@ pub enum RemoteRead {
 /// safe read loop readable. The event is boxed because [`ServerEvent`] is large.
 enum LineOutcome {
     Event(Box<ServerEvent>),
+    OpReply(Box<SshOpResponse>),
     Skip,
     Disconnect(RemoteDisconnectReason),
 }
@@ -636,6 +642,87 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server for the daemon-owned session list used by the remote
+    /// `/resume` picker. Returns the request id so the client can correlate
+    /// the `list_sessions` sideband reply.
+    pub async fn list_sessions(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::ListSessions,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Ask the server for a bounded message preview of one session. Returns
+    /// the request id for correlating the `session_preview` sideband reply.
+    pub async fn session_preview(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::SessionPreview {
+                session_id: session_id.to_string(),
+            },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Toggle the saved/bookmarked flag on a server-owned session. Used by
+    /// `/save`/`/unsave` when the client cannot write the session file itself
+    /// (SSH remotes, picker rows for non-attached sessions).
+    pub async fn set_session_saved(
+        &mut self,
+        session_id: &str,
+        saved: bool,
+        save_label: Option<String>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::SetSessionSaved {
+                session_id: session_id.to_string(),
+                saved,
+                save_label,
+            },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Fetch the todo items stored for a session on the server. The response
+    /// arrives as a `get_todos` sideband reply correlated by the returned id.
+    pub async fn get_todos(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::GetTodos {
+                session_id: session_id.to_string(),
+            },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Fetch the remote host's effective skill list for the bridge working
+    /// directory (name/description/path rows for `/skills`). The response
+    /// arrives as a `list_skills` sideband reply.
+    pub async fn list_skills(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::ListSkills,
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Re-request the session history payload from the server.
     ///
     /// Used by the client-side history-recovery watchdog: if the bootstrap
@@ -667,6 +754,82 @@ impl RemoteConnection {
         })
         .await?;
         Ok(id)
+    }
+
+    /// Replace the daemon's `config.toml` (SSH remote-primary writes).
+    pub async fn write_config(&mut self, content: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::WriteConfig { content },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Read the daemon's raw `config.toml` text. The reply arrives as a
+    /// `read_config` sideband reply carrying this request's id.
+    pub async fn read_config(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::ReadConfig,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Read a file on the daemon host (`~`/relative paths resolve remotely).
+    pub async fn read_file(&mut self, path: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::ReadFile { path },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Write a file on the daemon host (`~`/relative paths resolve remotely).
+    pub async fn write_file(&mut self, path: String, content: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::WriteFile { path, content },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// List `@`-completion candidates on the daemon host for `prefix`.
+    pub async fn list_path(&mut self, prefix: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::ListPath { prefix },
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Send a sideband client-op envelope to the SSH stdio bridge.
+    /// Ops are only available when the remote bridge advertises
+    /// `sideband_ops` in its handshake (surfaced as `JCODE_SSH_OPS=1`).
+    async fn send_sideband_op(&self, request: SshOpRequest) -> Result<()> {
+        if !crate::tui::ssh_ops_supported() {
+            anyhow::bail!(
+                "remote bridge does not support sideband client ops; update the remote jcode binary"
+            );
+        }
+        let json = ssh_ops::encode_request(&request)? + "\n";
+        let mut w = self.writer.lock().await;
+        w.write_all(json.as_bytes()).await?;
+        Ok(())
     }
 
     /// Resume a specific session by ID
@@ -1114,6 +1277,7 @@ impl RemoteConnection {
             if let Some(line) = self.take_buffered_line() {
                 match self.classify_protocol_line(line, &mut stray_lines) {
                     LineOutcome::Event(event) => return RemoteRead::Event(*event),
+                    LineOutcome::OpReply(reply) => return RemoteRead::OpReply(reply),
                     LineOutcome::Skip => continue,
                     LineOutcome::Disconnect(reason) => return RemoteRead::Disconnected(reason),
                 }
@@ -1261,6 +1425,31 @@ impl RemoteConnection {
                 ));
             }
             return LineOutcome::Skip;
+        }
+        // Sideband op replies share the stream with daemon events but
+        // are not `ServerEvent`s — decode and surface them separately.
+        if ssh_ops::is_op_line(text.as_bytes()) {
+            return match ssh_ops::decode_response(&text) {
+                Ok(response) => LineOutcome::OpReply(Box::new(response)),
+                Err(error) => {
+                    *stray_lines += 1;
+                    crate::logging::warn(&format!(
+                        "RemoteConnection::next_event: skipping unparseable sideband op line {}/{} error={} (session_id={:?}, client_instance_id={:?})",
+                        *stray_lines,
+                        MAX_STRAY_REMOTE_PROTOCOL_LINES,
+                        error,
+                        self.session_id,
+                        self.client_instance_id
+                    ));
+                    if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
+                        return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
+                            "too many unparseable protocol lines; last error: {}",
+                            error
+                        )));
+                    }
+                    LineOutcome::Skip
+                }
+            };
         }
         match serde_json::from_str(&text) {
             Ok(ServerEvent::Done { id })

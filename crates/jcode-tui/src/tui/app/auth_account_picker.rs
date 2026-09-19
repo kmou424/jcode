@@ -9,7 +9,7 @@ impl App {
 
         let status = crate::auth::AuthStatus::check_fast();
         let validation = crate::auth::validation::load_all();
-        let cfg = crate::config::Config::load();
+        let cfg = crate::config::config();
         let providers: Vec<_> = match provider_filter {
             Some(provider_id) => match resolve_account_provider_descriptor(provider_id) {
                 Some(provider) => vec![provider],

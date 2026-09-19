@@ -20,6 +20,7 @@ mod input_dispatch;
 mod key_handling;
 mod queue_recovery;
 mod reconnect;
+mod remote_files;
 mod server_event_handlers;
 mod server_events;
 mod session_persistence;
@@ -43,8 +44,8 @@ pub(super) use reconnect::{
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
-    persist_remote_session_metadata, persist_replay_display_message, persist_swarm_plan_snapshot,
-    persist_swarm_status_snapshot,
+    persist_remote_session_metadata, persist_remote_session_mode_flag,
+    persist_replay_display_message, persist_swarm_plan_snapshot, persist_swarm_status_snapshot,
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
@@ -138,6 +139,129 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+
+    // Remote session picker (SSH `/resume`): send the one-shot list request
+    // plus the preview prefetch queue the picker seeded when the list landed.
+    if app.pending_remote_session_list {
+        app.pending_remote_session_list = false;
+        if let Err(err) = remote.list_sessions().await {
+            app.session_picker_overlay = None;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to load remote sessions: {}",
+                err
+            )));
+            needs_redraw = true;
+        }
+    }
+    // SSH `/todos`: ask the bridge for the session's stored todo items; the
+    // reply arrives as a `get_todos` sideband reply and renders the inline card.
+    if app.pending_remote_todos_request {
+        app.pending_remote_todos_request = false;
+        let session_id = app
+            .active_client_session_id()
+            .unwrap_or_else(|| app.session.id.as_str())
+            .to_string();
+        if let Err(err) = remote.get_todos(&session_id).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to load remote todos: {}",
+                err
+            )));
+            needs_redraw = true;
+        }
+    }
+    // After a History payload lands in SSH mode, refresh the remote skill
+    // metadata rows (`/skills`) through the `list_skills` sideband op.
+    if app.pending_remote_skill_infos {
+        app.pending_remote_skill_infos = false;
+        if let Err(err) = remote.list_skills().await {
+            crate::logging::warn(&format!("Failed to load remote skills: {}", err));
+        }
+    }
+    // Remote-primary config writes: `Config::save`/`create_default_config_file`
+    // under the remote override queue their TOML instead of touching the
+    // local file; forward each payload as a `write_config` request.
+    for toml in crate::config::drain_remote_config_writes() {
+        if let Err(err) = remote.write_config(toml).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to write remote config: {}",
+                err
+            )));
+            needs_redraw = true;
+        }
+    }
+    // `/config edit` over SSH: fetch the daemon's raw `config.toml` first so
+    // the local `$EDITOR` round-trip preserves comments.
+    if app.pending_remote_config_edit_request {
+        app.pending_remote_config_edit_request = false;
+        match remote.read_config().await {
+            Ok(id) => app.awaiting_remote_config_edit = Some(id),
+            Err(err) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to request remote config: {}",
+                    err
+                )));
+                needs_redraw = true;
+            }
+        }
+    }
+    // SSH attach: seed the remote config override once per History so
+    // `config` reads follow the remote machine's settings.
+    if app.pending_remote_config_seed {
+        app.pending_remote_config_seed = false;
+        match remote.read_config().await {
+            Ok(id) => app.awaiting_remote_config_seed = Some(id),
+            Err(err) => crate::logging::warn(&format!("Failed to seed remote config: {}", err)),
+        }
+    }
+    // Queued remote file requests (`/swarm-prompt` probes and writes).
+    while let Some(request) = app.pending_remote_file_requests.pop_front() {
+        match request {
+            super::PendingRemoteFileRequest::Read { path, op } => {
+                match remote.read_file(path).await {
+                    Ok(id) => {
+                        app.remote_file_read_ops.insert(id, op);
+                    }
+                    Err(err) => {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to read remote file: {}",
+                            err
+                        )));
+                        needs_redraw = true;
+                    }
+                }
+            }
+            super::PendingRemoteFileRequest::Write { path, content } => {
+                if let Err(err) = remote.write_file(path, content).await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to write remote file: {}",
+                        err
+                    )));
+                    needs_redraw = true;
+                }
+            }
+        }
+    }
+    // `@` path completion: send only the newest queued prefix so a burst of
+    // keystrokes collapses into one `list_path` request.
+    if let Some(prefix) = app.pending_remote_path_completion.take() {
+        match remote.list_path(prefix).await {
+            Ok(id) => app.remote_path_completion_id = Some(id),
+            Err(err) => {
+                crate::logging::warn(&format!("Remote path completion failed: {}", err));
+            }
+        }
+    }
+    // Keep a small window of preview requests in flight so the picker warms
+    // its cache in list order without hammering the daemon.
+    for session_id in app.take_remote_preview_requests(4) {
+        if let Err(err) = remote.session_preview(&session_id).await {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker.borrow_mut().mark_preview_failed(&session_id);
+            }
+            app.set_status_notice(format!("Session preview failed: {}", err));
+            needs_redraw = true;
+        }
+    }
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
@@ -904,6 +1028,68 @@ pub(super) async fn handle_remote_event<B: Backend>(
             let needs_redraw = handle_server_event(app, server_event, remote);
             process_remote_followups(app, remote).await;
             Ok((RemoteEventOutcome::Continue, needs_redraw))
+        }
+        RemoteRead::OpReply(reply) => {
+            let needs_redraw = handle_sideband_reply(app, *reply);
+            process_remote_followups(app, remote).await;
+            Ok((RemoteEventOutcome::Continue, needs_redraw))
+        }
+    }
+}
+
+/// Dispatch a sideband client-op reply to the flow that requested it.
+/// Mirrors the old daemon-event arms: op replies are not `ServerEvent`s, but
+/// each typed result feeds the same `apply_*`/`remote_files::*` consumers.
+pub(super) fn handle_sideband_reply(
+    app: &mut App,
+    reply: jcode_app_core::ssh_ops::SshOpResponse,
+) -> bool {
+    use jcode_app_core::ssh_ops::{SshOpOutcome, SshOpResponse, SshOpResult};
+    let SshOpResponse { id, outcome } = reply;
+    let result = match outcome {
+        SshOpOutcome::Result(result) => result,
+        SshOpOutcome::Error(message) => {
+            if remote_files::handle_remote_file_error(app, id, &message) {
+                return true;
+            }
+            app.push_display_message(DisplayMessage::error(format!(
+                "Remote op failed: {}",
+                message
+            )));
+            return true;
+        }
+    };
+    match result {
+        SshOpResult::ListSessions(sessions) => app.apply_remote_session_list(sessions),
+        SshOpResult::SessionPreview {
+            session_id,
+            messages,
+        } => app.apply_remote_session_preview(&session_id, messages),
+        SshOpResult::SetSessionSaved => true,
+        SshOpResult::GetTodos {
+            todos, goals, plan, ..
+        } => {
+            app.apply_remote_todos(todos, goals, plan);
+            true
+        }
+        SshOpResult::ReadConfig { path, content } | SshOpResult::ReadFile { path, content } => {
+            remote_files::handle_file_content(app, id, path, content)
+        }
+        SshOpResult::WriteConfig | SshOpResult::WriteFile => true,
+        SshOpResult::ListPath(paths) => remote_files::handle_path_candidates(app, id, paths),
+        SshOpResult::ListSkills(infos) => {
+            // `History.skills` arrives empty on remotes without the
+            // persisted-path seed, and an empty History may land after this
+            // reply — union the reported names so `/` candidates, `/skills`
+            // and invocation matching all see them either way.
+            for name in infos.iter().map(|info| info.name.clone()) {
+                if !app.remote_skills.contains(&name) {
+                    app.remote_skills.push(name);
+                }
+            }
+            app.remote_skill_infos = infos;
+            app.invalidate_command_candidates_cache();
+            true
         }
     }
 }

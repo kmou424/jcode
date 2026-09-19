@@ -543,6 +543,8 @@ impl App {
             pending_remote_model_refresh_snapshot: None,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
+            remote_skill_infos: Vec::new(),
+            pending_remote_skill_infos: false,
             remote_total_tokens: None,
             remote_token_usage_totals: None,
             remote_is_canary: None,
@@ -755,6 +757,18 @@ impl App {
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
+            pending_remote_session_list: false,
+            pending_remote_todos_request: false,
+            pending_remote_config_edit_request: false,
+            awaiting_remote_config_edit: None,
+            pending_remote_config_seed: false,
+            awaiting_remote_config_seed: None,
+            pending_remote_file_requests: std::collections::VecDeque::new(),
+            remote_file_read_ops: std::collections::HashMap::new(),
+            pending_remote_path_completion: None,
+            remote_path_completion_id: None,
+            pending_catchup_next: false,
+            remote_catchup_candidates: Vec::new(),
             catchup_return_stack: Vec::new(),
             pending_catchup_resume: None,
             in_flight_catchup_resume: None,
@@ -778,7 +792,14 @@ impl App {
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let t0 = std::time::Instant::now();
-        let skills = SkillRegistry::shared_snapshot();
+        // SSH mode is remote-primary: skill metadata arrives via the
+        // `list_skills` sideband op; the laptop's skill registry must not be
+        // scanned into the snapshot.
+        let skills = if crate::tui::is_ssh_remote() {
+            Arc::new(SkillRegistry::default())
+        } else {
+            SkillRegistry::shared_snapshot()
+        };
         let t_skills = t0.elapsed();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
@@ -999,6 +1020,8 @@ impl App {
             pending_remote_model_refresh_snapshot: None,
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
+            remote_skill_infos: Vec::new(),
+            pending_remote_skill_infos: false,
             remote_total_tokens: None,
             remote_token_usage_totals: None,
             remote_is_canary: None,
@@ -1211,6 +1234,18 @@ impl App {
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
+            pending_remote_session_list: false,
+            pending_remote_todos_request: false,
+            pending_remote_config_edit_request: false,
+            awaiting_remote_config_edit: None,
+            pending_remote_config_seed: false,
+            awaiting_remote_config_seed: None,
+            pending_remote_file_requests: std::collections::VecDeque::new(),
+            remote_file_read_ops: std::collections::HashMap::new(),
+            pending_remote_path_completion: None,
+            remote_path_completion_id: None,
+            pending_catchup_next: false,
+            remote_catchup_candidates: Vec::new(),
             catchup_return_stack: Vec::new(),
             pending_catchup_resume: None,
             in_flight_catchup_resume: None,

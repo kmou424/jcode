@@ -320,18 +320,18 @@ impl App {
     pub(super) fn rank_suggestions(
         &self,
         needle: &str,
-        candidates: Vec<(String, &'static str)>,
-    ) -> Vec<(String, &'static str)> {
+        candidates: Vec<(String, impl Into<String>)>,
+    ) -> Vec<(String, String)> {
         let needle = needle.to_lowercase();
         // Bucket 1 = literal prefix matches (exact typing always wins).
         // Bucket 0 = typo-tolerant fuzzy matches by descending score.
-        let mut scored: Vec<(u8, i32, String, &'static str)> = Vec::new();
+        let mut scored: Vec<(u8, i32, String, String)> = Vec::new();
         for (cmd, help) in candidates {
             let lower = cmd.to_lowercase();
             if lower.starts_with(&needle) {
-                scored.push((1, i32::MAX, cmd, help));
+                scored.push((1, i32::MAX, cmd, help.into()));
             } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
-                scored.push((0, score, cmd, help));
+                scored.push((0, score, cmd, help.into()));
             }
         }
         scored.sort_by(|a, b| {
@@ -346,31 +346,39 @@ impl App {
             .collect()
     }
 
-    fn command_candidates(&self) -> Vec<(String, &'static str)> {
+    fn command_candidates(&self) -> Vec<(String, String)> {
         if let Some(cache) = self.command_candidates_cache.borrow().as_ref() {
             return cache.candidates.clone();
         }
 
         fn push_skill_commands(
-            commands: &mut Vec<(String, &'static str)>,
+            commands: &mut Vec<(String, String)>,
             seen: &mut std::collections::HashSet<String>,
             skills: &crate::skill::SkillRegistry,
         ) {
             for skill in skills.list() {
                 let command = format!("/{}", skill.name);
                 if seen.insert(command.clone()) {
-                    commands.push((command, "Activate skill"));
+                    commands.push((
+                        command,
+                        if skill.description.is_empty() {
+                            "Activate skill".to_string()
+                        } else {
+                            skill.description.clone()
+                        },
+                    ));
                 }
             }
         }
 
         let mut seen = std::collections::HashSet::new();
-        let mut commands: Vec<(String, &'static str)> = REGISTERED_COMMANDS
+        let mut commands: Vec<(String, String)> = REGISTERED_COMMANDS
             .iter()
             .filter(|command| !command.hidden)
             .filter_map(|command| {
                 let name = command.name.to_string();
-                seen.insert(name.clone()).then_some((name, command.help))
+                seen.insert(name.clone())
+                    .then_some((name, command.help.to_string()))
             })
             .collect();
 
@@ -381,7 +389,11 @@ impl App {
             for skill in &self.remote_skills {
                 let command = format!("/{skill}");
                 if seen.insert(command.clone()) {
-                    commands.push((command, "Activate skill"));
+                    commands.push((
+                        command,
+                        self.skill_description_for_display(skill)
+                            .unwrap_or_else(|| "Activate skill".to_string()),
+                    ));
                 }
             }
         }
@@ -507,7 +519,7 @@ impl App {
     }
 
     /// Get command suggestions based on current input (or base input for cycling)
-    pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+    pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, String)> {
         let input = input.trim_start();
 
         if crate::tui::is_ssh_remote() {
@@ -545,7 +557,7 @@ impl App {
 
             let suggestions = self.model_suggestion_candidates();
             if suggestions.is_empty() {
-                return vec![("/model".into(), "Open model picker")];
+                return vec![("/model".into(), "Open model picker".to_string())];
             }
             return self.rank_suggestions(input, suggestions);
         }
@@ -601,11 +613,20 @@ impl App {
             return vec![
                 (
                     "/autoreview status".into(),
-                    "Show current autoreview status",
+                    "Show current autoreview status".to_string(),
                 ),
-                ("/autoreview on".into(), "Enable end-of-turn autoreview"),
-                ("/autoreview off".into(), "Disable end-of-turn autoreview"),
-                ("/autoreview now".into(), "Launch a reviewer immediately"),
+                (
+                    "/autoreview on".into(),
+                    "Enable end-of-turn autoreview".to_string(),
+                ),
+                (
+                    "/autoreview off".into(),
+                    "Disable end-of-turn autoreview".to_string(),
+                ),
+                (
+                    "/autoreview now".into(),
+                    "Launch a reviewer immediately".to_string(),
+                ),
             ];
         }
 
@@ -623,10 +644,22 @@ impl App {
 
         if prefix_trimmed == "/autojudge" {
             return vec![
-                ("/autojudge status".into(), "Show current autojudge status"),
-                ("/autojudge on".into(), "Enable end-of-turn autojudge"),
-                ("/autojudge off".into(), "Disable end-of-turn autojudge"),
-                ("/autojudge now".into(), "Launch a judge immediately"),
+                (
+                    "/autojudge status".into(),
+                    "Show current autojudge status".to_string(),
+                ),
+                (
+                    "/autojudge on".into(),
+                    "Enable end-of-turn autojudge".to_string(),
+                ),
+                (
+                    "/autojudge off".into(),
+                    "Disable end-of-turn autojudge".to_string(),
+                ),
+                (
+                    "/autojudge now".into(),
+                    "Launch a judge immediately".to_string(),
+                ),
             ];
         }
 
@@ -638,7 +671,10 @@ impl App {
         }
 
         if prefix_trimmed == "/review" {
-            return vec![("/review".into(), "Launch a one-shot review immediately")];
+            return vec![(
+                "/review".into(),
+                "Launch a one-shot review immediately".to_string(),
+            )];
         }
 
         if prefix.starts_with("/judge ") {
@@ -649,18 +685,21 @@ impl App {
         }
 
         if prefix_trimmed == "/judge" {
-            return vec![("/judge".into(), "Launch a one-shot judge immediately")];
+            return vec![(
+                "/judge".into(),
+                "Launch a one-shot judge immediately".to_string(),
+            )];
         }
 
         if prefix_trimmed == "/subagent-model" {
             return vec![
                 (
                     "/subagent-model show".into(),
-                    "Show the current subagent model policy",
+                    "Show the current subagent model policy".to_string(),
                 ),
                 (
                     "/subagent-model inherit".into(),
-                    "Use the current active model",
+                    "Use the current active model".to_string(),
                 ),
             ];
         }
@@ -686,16 +725,25 @@ impl App {
         }
 
         if prefix_trimmed == "/subagent" {
-            return vec![("/subagent ".into(), "Launch a subagent with a prompt")];
+            return vec![(
+                "/subagent ".into(),
+                "Launch a subagent with a prompt".to_string(),
+            )];
         }
 
         // /model opens the interactive picker, and `/model <name>` supports direct completion.
         if prefix_trimmed == "/model" || prefix_trimmed == "/models" {
-            return vec![("/model".into(), "Open model picker or type `/model <name>`")];
+            return vec![(
+                "/model".into(),
+                "Open model picker or type `/model <name>`".to_string(),
+            )];
         }
 
         if prefix_trimmed == "/agents" {
-            return vec![("/agents".into(), "Open agent model config picker")];
+            return vec![(
+                "/agents".into(),
+                "Open agent model config picker".to_string(),
+            )];
         }
 
         if prefix.starts_with("/help ") || prefix.starts_with("/? ") {
@@ -746,7 +794,10 @@ impl App {
         }
 
         if prefix_trimmed == "/git" {
-            return vec![("/git status".into(), "Show branch and working tree status")];
+            return vec![(
+                "/git status".into(),
+                "Show branch and working tree status".to_string(),
+            )];
         }
 
         if prefix.starts_with("/transcript ") {
@@ -762,7 +813,7 @@ impl App {
         if prefix_trimmed == "/transcript" {
             return vec![(
                 "/transcript path".into(),
-                "Print transcript path without opening",
+                "Print transcript path without opening".to_string(),
             )];
         }
 
@@ -1176,7 +1227,10 @@ impl App {
                 if let Ok(n) = arg.parse::<usize>()
                     && (1..=visible_count).contains(&n)
                 {
-                    return vec![(format!("/rewind {}", n), "Rewind to this message")];
+                    return vec![(
+                        format!("/rewind {}", n),
+                        "Rewind to this message".to_string(),
+                    )];
                 }
                 return Vec::new();
             }
@@ -1191,7 +1245,7 @@ impl App {
     }
 
     /// Get command suggestions based on current input
-    pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+    pub fn command_suggestions(&self) -> Vec<(String, String)> {
         // Read up to eight times per frame; recomputing each time re-ranks
         // every registered command and skill (and can touch disk for some
         // prefixes). Memoize on the exact input plus the guard state the
@@ -1243,7 +1297,7 @@ impl App {
     pub(super) fn command_suggestions_uncached(
         &self,
         signature: &CommandSuggestionsSignature,
-    ) -> Vec<(String, &'static str)> {
+    ) -> Vec<(String, String)> {
         // While an interactive prompt is waiting for typed input (API key,
         // OAuth callback, account label, SSH target), the composer is an
         // answer box, not a command line. Rendering the full command palette
@@ -1256,7 +1310,7 @@ impl App {
             let input = self.input.trim_start();
             let typed = input.trim_end();
             if !typed.is_empty() && typed.starts_with('/') && "/cancel".starts_with(typed) {
-                return vec![("/cancel".into(), "Cancel the pending prompt")];
+                return vec![("/cancel".into(), "Cancel the pending prompt".to_string())];
             }
             return Vec::new();
         }
@@ -1281,7 +1335,7 @@ impl App {
         self.get_suggestions_for(&self.input)
     }
 
-    fn clamp_command_suggestion_selection(&mut self) -> Vec<(String, &'static str)> {
+    fn clamp_command_suggestion_selection(&mut self) -> Vec<(String, String)> {
         let suggestions = self.command_suggestions();
         if suggestions.is_empty() {
             self.command_suggestion_selected = 0;

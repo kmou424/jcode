@@ -158,6 +158,9 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
         let _entered = runtime.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         let event = crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "remote-only-session".into(),
             messages: vec![],
@@ -244,5 +247,60 @@ fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
         assert!(info.ambient_info.is_none());
         assert!(info.git_info.is_none());
         assert!(crate::tui::scheduled_notification_text(info.ambient_info.as_ref()).is_none());
+    });
+}
+
+#[test]
+fn ssh_remote_list_skills_reply_feeds_skill_names_and_survives_empty_history() {
+    use jcode_app_core::ssh_ops::{SshOpOutcome, SshOpResponse, SshOpResult, SshSkillInfo};
+
+    with_ssh_remote_test_home(|| {
+        let mut app = App::new_for_remote(None);
+        assert!(app.remote_skills.is_empty());
+
+        // The `list_skills` sideband reply is the only name source on remotes
+        // whose History.skills arrives empty (no persisted-path seed).
+        let reply = SshOpResponse {
+            id: 1,
+            outcome: SshOpOutcome::Result(SshOpResult::ListSkills(vec![
+                SshSkillInfo {
+                    name: "remote-skill".to_string(),
+                    description: "Remote description".to_string(),
+                    path: "/remote/skills/remote-skill/SKILL.md".to_string(),
+                },
+                SshSkillInfo {
+                    name: "other-skill".to_string(),
+                    description: String::new(),
+                    path: String::new(),
+                },
+            ])),
+        };
+        assert!(super::remote::handle_sideband_reply(&mut app, reply));
+
+        assert_eq!(
+            app.remote_skills,
+            vec!["remote-skill".to_string(), "other-skill".to_string()]
+        );
+        assert_eq!(app.remote_skill_infos.len(), 2);
+
+        // A second reply unions rather than duplicating.
+        let reply = SshOpResponse {
+            id: 2,
+            outcome: SshOpOutcome::Result(SshOpResult::ListSkills(vec![
+                SshSkillInfo {
+                    name: "other-skill".to_string(),
+                    description: String::new(),
+                    path: String::new(),
+                },
+                SshSkillInfo {
+                    name: "new-skill".to_string(),
+                    description: String::new(),
+                    path: String::new(),
+                },
+            ])),
+        };
+        assert!(super::remote::handle_sideband_reply(&mut app, reply));
+        assert_eq!(app.remote_skills.len(), 3);
+        assert!(app.remote_skills.contains(&"new-skill".to_string()));
     });
 }

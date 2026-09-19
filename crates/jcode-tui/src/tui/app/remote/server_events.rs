@@ -1232,10 +1232,16 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
             ..
         } => {
+            // A reply to a queued `read_config`/`read_file`/`list_path` request
+            // belongs to the remote-file flows, not the turn machinery.
+            if remote_files::handle_remote_file_error(app, id, &message) {
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1561,6 +1567,15 @@ pub(in crate::tui::app) fn handle_server_event(
             side_panel,
             ..
         } => {
+            // SSH attach: remote config + skill metadata travel on the
+            // sideband ops channel, not inside History. Queue the
+            // `read_config`/`list_skills` ops; the replies install the
+            // process-wide remote config override and `/skills` rows.
+            if crate::tui::is_ssh_remote() {
+                app.pending_remote_config_seed = true;
+                app.pending_remote_skill_infos = true;
+            }
+
             let prev_session_id = app.remote_session_id.clone();
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
@@ -1773,7 +1788,13 @@ pub(in crate::tui::app) fn handle_server_event(
             // was still loading. Replace that loading row as soon as history
             // supplies the authoritative snapshot.
             app.refresh_open_model_picker_after_catalog_update();
-            app.remote_skills = skills;
+            // `list_skills` sideband replies also feed `remote_skills` and
+            // may have landed before this History. An empty History list
+            // (every remote without the persisted-path seed) must not erase
+            // names the sideband already supplied.
+            if !skills.is_empty() || app.remote_skills.is_empty() {
+                app.remote_skills = skills;
+            }
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
@@ -2830,9 +2851,44 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             if crate::tui::is_ssh_remote() {
                 app.pending_split_request = false;
-                app.set_status_notice(format!(
-                    "Remote session created: {new_session_id}. Resume using --ssh and --resume."
-                ));
+                finish_remote_split_launch(app);
+                let startup_message = app.pending_split_startup_message.take();
+                let startup_prompt = app.pending_split_prompt.take();
+                app.pending_split_model_override = None;
+                app.pending_split_provider_key_override = None;
+                app.pending_split_label = None;
+                app.pending_split_parent_session_id = None;
+                // The client-input handoff file lives on this machine and the
+                // spawned window reads it locally, then submits over the wire —
+                // so staging it here delivers the prompt to the remote session.
+                if let Some(startup_message) = startup_message {
+                    App::save_startup_message_for_session(&new_session_id, startup_message);
+                } else if let Some(startup_prompt) = startup_prompt {
+                    App::save_startup_submission_for_session(
+                        &new_session_id,
+                        startup_prompt.content,
+                        startup_prompt.images,
+                    );
+                }
+                let exe = app_mod::launch_client_executable();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                match app_mod::helpers::spawn_ssh_session_in_new_terminal(
+                    &exe,
+                    &new_session_id,
+                    &cwd,
+                ) {
+                    Ok(true) => {
+                        app.set_status_notice(format!("{new_session_name} opened in new window"));
+                    }
+                    _ => {
+                        let hint = app_mod::helpers::ssh_resume_args(&new_session_id)
+                            .map(|args| format!(" Resume with: jcode {}", args.join(" ")))
+                            .unwrap_or_default();
+                        app.set_status_notice(format!(
+                            "Remote session created: {new_session_id}.{hint}"
+                        ));
+                    }
+                }
                 return false;
             }
             finish_remote_split_launch(app);

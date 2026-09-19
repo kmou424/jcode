@@ -1742,10 +1742,29 @@ fn build_skills_report(app: &App) -> String {
 
     let active = app.active_skill().map(|s| s.to_string());
 
-    // Loaded skills. In remote mode we only have names; locally we have full
-    // skill metadata (description + path).
+    // Loaded skills. Remote sessions render from `remote_skill_infos`
+    // (description + daemon-side path, falling back to bare names on
+    // pre-skill-metadata daemons); locally we have the full registry.
     out.push_str("Loaded skills\n");
-    if app.is_remote && !app.remote_skills.is_empty() {
+    if (app.is_remote || crate::tui::is_ssh_remote()) && !app.remote_skill_infos.is_empty() {
+        let mut infos = app.remote_skill_infos.clone();
+        infos.sort_by(|a, b| a.name.cmp(&b.name));
+        for info in &infos {
+            let marker = if active.as_deref() == Some(info.name.as_str()) {
+                " (active)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("- /{}{}\n", info.name, marker));
+            if !info.description.is_empty() {
+                out.push_str(&format!("    {}\n", info.description));
+            }
+            if !info.path.is_empty() {
+                out.push_str(&format!("    path: {}\n", info.path));
+            }
+        }
+    } else if (app.is_remote || crate::tui::is_ssh_remote()) && !app.remote_skills.is_empty() {
+        // Pre-skill-metadata daemon: names only.
         let mut names = app.remote_skills.clone();
         names.sort();
         for name in &names {

@@ -218,7 +218,7 @@ fn test_rewind_autocomplete_uses_visible_message_count() {
     let suggestions = app.get_suggestions_for(&app.input);
     assert_eq!(
         suggestions,
-        vec![("/rewind 1".to_string(), "Rewind to this message")]
+        vec![("/rewind 1".to_string(), "Rewind to this message".to_string())]
     );
 }
 

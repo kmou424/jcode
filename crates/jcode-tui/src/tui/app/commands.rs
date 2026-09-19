@@ -74,6 +74,40 @@ pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, St
     }
 }
 
+fn run_poke_command(app: &mut App, command: Result<PokeCommand, String>) {
+    match command {
+        Err(error) => app.push_display_message(DisplayMessage::error(error)),
+        Ok(PokeCommand::Status) => {
+            app.push_display_message(DisplayMessage::system(poke_status_message(app)));
+        }
+        Ok(PokeCommand::Off) => {
+            let cleared = disable_auto_poke(app);
+            app.set_status_notice("Poke: OFF");
+            app.push_display_message(DisplayMessage::system(poke_disabled_message(cleared)));
+        }
+        Ok(PokeCommand::Trigger | PokeCommand::On) => {
+            activate_auto_poke_local(app);
+        }
+    }
+}
+
+/// Slash commands that only stage a prompt for the session or manage
+/// client-side prompt scheduling. They are safe in SSH mode: the crafted
+/// prompt travels over the wire like any other input and the bookkeeping
+/// lives in this client. Kept separate from `handle_session_command`, whose
+/// other arms mutate laptop-local session files.
+pub(super) fn handle_ssh_prompt_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(command) = parse_plan_command(trimmed) {
+        handle_plan_command_local(app, command);
+        return true;
+    }
+    if let Some(command) = parse_poke_command(trimmed) {
+        run_poke_command(app, command);
+        return true;
+    }
+    false
+}
+
 pub(super) fn is_poke_message(message: &str) -> bool {
     crate::todo::is_auto_poke_message(message)
 }
@@ -1405,6 +1439,30 @@ fn handle_catchup_command(app: &mut App, trimmed: &str) -> bool {
                 app.set_status_notice("Finish current work before Catch Up");
                 return true;
             }
+            if crate::tui::is_ssh_remote() {
+                // Candidates come from the remote `list_sessions` reply — use
+                // the stash from the last picker refresh, else fetch it and
+                // let `apply_remote_session_list` queue the resume.
+                if app.remote_catchup_candidates.is_empty() {
+                    app.pending_remote_session_list = true;
+                    app.pending_catchup_next = true;
+                    app.set_status_notice("Checking remote sessions for Catch Up...");
+                    return true;
+                }
+                let target = app.remote_catchup_candidates[0].clone();
+                let total = app.remote_catchup_candidates.len();
+                let source_session_id = active_session_id(app);
+                let target_name = crate::id::extract_session_name(&target)
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| target.clone());
+                app.queue_catchup_resume(target, Some(source_session_id), Some((1, total)), true);
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Queued Catch Up for {}.",
+                    target_name,
+                )));
+                app.set_status_notice(format!("Catch Up → {}", target_name));
+                return true;
+            }
             let candidates = load_catchup_candidates(app);
             let total = candidates.len();
             let Some(target) = candidates.first() else {
@@ -2123,21 +2181,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if let Some(command) = parse_poke_command(trimmed) {
-        match command {
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-            Ok(PokeCommand::Status) => {
-                app.push_display_message(DisplayMessage::system(poke_status_message(app)));
-            }
-            Ok(PokeCommand::Off) => {
-                let cleared = disable_auto_poke(app);
-                app.set_status_notice("Poke: OFF");
-                app.push_display_message(DisplayMessage::system(poke_disabled_message(cleared)));
-            }
-            Ok(PokeCommand::Trigger | PokeCommand::On) => {
-                activate_auto_poke_local(app);
-            }
-        }
-
+        run_poke_command(app, command);
         return true;
     }
 
@@ -3046,6 +3090,31 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         return false;
     }
 
+    if crate::tui::is_ssh_remote() {
+        // Remote-primary: the prompt file lives on the daemon host. Probe the
+        // project file first (matching `ensure_swarm_prompt_edit_path`), then
+        // the global file, then create the global file with the default
+        // template — all through `read_file`/`write_file` sideband ops. The
+        // replies continue in `remote_files::continue_swarm_prompt_edit`.
+        if app.remote_file_read_ops.values().any(|op| {
+            matches!(
+                op,
+                super::RemoteFileReadOp::SwarmPromptProject
+                    | super::RemoteFileReadOp::SwarmPromptGlobal
+            )
+        }) {
+            app.set_status_notice("Swarm prompt read already in progress");
+            return true;
+        }
+        app.pending_remote_file_requests
+            .push_back(super::PendingRemoteFileRequest::Read {
+                path: ".jcode/swarm-prompt.md".to_string(),
+                op: super::RemoteFileReadOp::SwarmPromptProject,
+            });
+        app.set_status_notice("Reading remote swarm prompt...");
+        return true;
+    }
+
     let jcode_dir = match crate::storage::jcode_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -3110,7 +3179,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
 /// Interactive editors need the primary screen and cooked input. Spawning one
 /// while the TUI keeps ownership of the terminal causes arrow-key escape
 /// sequences and editor output to be consumed/rendered by both processes.
-fn run_interactive_editor(
+pub(super) fn run_interactive_editor(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::ExitStatus> {
     run_interactive_editor_with(
@@ -3253,7 +3322,7 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
         .trim();
 
     if rest.is_empty() || matches!(rest, "show" | "status") {
-        let saved = crate::config::Config::load().display.centered;
+        let saved = crate::config::config().display.centered;
         app.push_display_message(DisplayMessage::system(format!(
             "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press {} to toggle it for the current session.",
             alignment_label(app.centered),
@@ -3527,11 +3596,15 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
         use crate::config::Config;
         match Config::create_default_config_file() {
             Ok(path) => {
+                let location = if crate::tui::is_ssh_remote() {
+                    "on the remote host".to_string()
+                } else {
+                    format!("at:\n{}", path.display())
+                };
                 app.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!(
-                        "Created default config file at:\n{}\n\nEdit this file to customize your keybindings and settings.",
-                        path.display()
+                        "Created default config file {location}\n\nEdit this file to customize your keybindings and settings.",
                     ),
                     tool_calls: vec![],
                     duration_secs: None,
@@ -3555,6 +3628,15 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/config edit" {
         use crate::config::Config;
+        if crate::tui::is_ssh_remote() {
+            // Remote-primary: fetch the remote host's raw config.toml over the sideband,
+            // edit it locally in $EDITOR, then send the result back with
+            // `write_config`. The continuation lives in
+            // `remote_files::continue_remote_config_edit`.
+            app.pending_remote_config_edit_request = true;
+            app.set_status_notice("Fetching remote config...");
+            return true;
+        }
         if let Some(path) = Config::path() {
             if !path.exists()
                 && let Err(e) = Config::create_default_config_file()

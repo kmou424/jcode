@@ -246,6 +246,69 @@ static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
     })
 });
 
+/// Remote config override installed by an SSH-attached TUI.
+///
+/// When a client attaches to a remote daemon over `jcode --ssh`, the remote
+/// machine's `config.toml` is authoritative for everything the session drives —
+/// including UI toggles. The daemon ships its config in the `History` attach
+/// payload and the TUI installs it here, so every `config()` call site follows
+/// remote settings without threading a mode flag through the codebase. It
+/// persists across reconnects (each History re-installs it) and lives until the
+/// process exits.
+static REMOTE_CONFIG_OVERRIDE: RwLock<Option<&'static Config>> = RwLock::new(None);
+
+/// Install or clear the remote config override. `None` restores local config
+/// reads. Called by the TUI remote-attach path; never by the daemon itself.
+pub fn set_remote_config_override(config: Option<Config>) {
+    let next = config.map(leak_config);
+    if let Ok(mut slot) = REMOTE_CONFIG_OVERRIDE.write() {
+        *slot = next;
+    }
+}
+
+/// Whether the process is currently serving a remote-attached config.
+pub fn remote_config_override_active() -> bool {
+    REMOTE_CONFIG_OVERRIDE
+        .read()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false)
+}
+
+/// Whether this process is an SSH-mode client (`jcode --ssh` sets
+/// `JCODE_SSH_REMOTE` before launching the TUI). Under the remote-primary
+/// rule the client must never read or write the local `config.toml`: every
+/// file-touching entry point gates on this even before the `read_config`
+/// sideband seed installs the override.
+pub fn ssh_remote_active() -> bool {
+    std::env::var_os("JCODE_SSH_REMOTE").is_some_and(|v| !v.is_empty())
+}
+
+/// Serialized `config.toml` payloads queued while a remote override is
+/// active. `Config::save` and `create_default_config_file` route here instead
+/// of touching the local filesystem, and the TUI remote loop drains the queue
+/// and forwards each payload as a `write_config` wire request, so writes land
+/// on the remote machine exactly as a locally-run jcode would.
+static PENDING_REMOTE_CONFIG_WRITES: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Queue a serialized config payload for delivery to the remote daemon.
+/// Called by `Config::save`/`create_default_config_file` under a remote
+/// override; also usable directly by TUI flows that already hold TOML text
+/// (e.g. `/config edit`).
+pub fn queue_remote_config_write(content: String) {
+    if let Ok(mut queue) = PENDING_REMOTE_CONFIG_WRITES.lock() {
+        queue.push_back(content);
+    }
+}
+
+/// Take every queued remote config write, oldest first.
+pub fn drain_remote_config_writes() -> Vec<String> {
+    PENDING_REMOTE_CONFIG_WRITES
+        .lock()
+        .map(|mut queue| queue.drain(..).collect())
+        .unwrap_or_default()
+}
+
 fn leak_config(config: Config) -> &'static Config {
     Box::leak(Box::new(config))
 }
@@ -267,6 +330,19 @@ fn populate_context_limits_from_config_ref(cfg: &Config) {
 /// reloads config.toml and invalidates dependent auth/model caches. Older
 /// references remain valid for the duration of any in-flight operation.
 pub fn config() -> &'static Config {
+    if let Ok(slot) = REMOTE_CONFIG_OVERRIDE.read()
+        && let Some(remote) = *slot
+    {
+        return remote;
+    }
+
+    if ssh_remote_active() {
+        // Remote-primary: the laptop's config.toml is off limits. Until the
+        // `read_config` seed lands, serve defaults rather than local state.
+        static DEFAULTS: std::sync::OnceLock<&'static Config> = std::sync::OnceLock::new();
+        return DEFAULTS.get_or_init(|| leak_config(Config::default()));
+    }
+
     let now = Instant::now();
     if let Ok(cache) = CONFIG_CACHE.read()
         && !cache.force_reload

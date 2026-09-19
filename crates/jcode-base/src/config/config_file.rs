@@ -31,7 +31,20 @@ impl Config {
     /// Saving those defaults would destroy the user's existing config. It also
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
-    fn load_for_update() -> anyhow::Result<Self> {
+    ///
+    /// Under an SSH remote override the remote config is the document being
+    /// edited: the override already carries the daemon's parsed config, so the
+    /// caller mutates a clone of it and `save` ships the result back over the
+    /// wire.
+    pub fn load_for_update() -> anyhow::Result<Self> {
+        if super::remote_config_override_active() {
+            return Ok(super::config().clone());
+        }
+        if super::ssh_remote_active() {
+            // Remote-primary, pre-seed: editing starts from defaults; the
+            // write still ships to the remote host via the queued write path.
+            return Ok(Self::default());
+        }
         Ok(Self::load_from_file_strict()?.unwrap_or_default())
     }
 
@@ -48,6 +61,14 @@ impl Config {
 
     /// Load config from file only (no env overrides), preserving parse/read errors.
     fn load_from_file_strict() -> anyhow::Result<Option<Self>> {
+        if super::remote_config_override_active() {
+            return Ok(Some(super::config().clone()));
+        }
+        if super::ssh_remote_active() {
+            // Iron rule: an SSH-mode client never reads the local
+            // config.toml, seeded or not.
+            return Ok(None);
+        }
         let Some(path) = Self::path() else {
             return Ok(None);
         };
@@ -57,17 +78,43 @@ impl Config {
 
         let content = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
-        let mut config = toml::from_str::<Self>(&content).map_err(|e| {
+        let config = Self::from_str(&content).map_err(|e| {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
         })?;
-        config.display.apply_legacy_compat();
         // An explicit discovery opt-out is authoritative. Older saves wrote the
         // default endpoint too, so table shape cannot establish user intent.
         Ok(Some(config))
     }
 
+    /// Parse config from TOML text, applying the same legacy compatibility
+    /// pass as file loading.
+    pub fn from_str(content: &str) -> anyhow::Result<Self> {
+        let mut config = toml::from_str::<Self>(content)?;
+        config.display.apply_legacy_compat();
+        Ok(config)
+    }
+
     /// Save config to file
     pub fn save(&self) -> anyhow::Result<()> {
+        if super::remote_config_override_active() {
+            // Remote-primary mode: the wire request is queued for the TUI
+            // remote loop to forward as `write_config`, and the override is
+            // updated immediately so every subsequent `config()` read already
+            // observes the new values.
+            let content = toml::to_string_pretty(self)?;
+            super::queue_remote_config_write(content);
+            super::set_remote_config_override(Some(self.clone()));
+            return Ok(());
+        }
+        if super::ssh_remote_active() {
+            // Remote-primary, pre-seed: queue the write for `write_config`
+            // delivery; the pending `read_config` seed still owns the
+            // override slot, so nothing is installed here and the laptop's
+            // config.toml stays untouched (iron rule).
+            let content = toml::to_string_pretty(self)?;
+            super::queue_remote_config_write(content);
+            return Ok(());
+        }
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         // Ensure parent directory exists

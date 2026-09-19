@@ -617,6 +617,25 @@ async fn send_history_from_persisted_session(
         .reasoning_effort
         .clone()
         .or_else(|| provider.reasoning_effort());
+    // The busy-agent path cannot ask the agent for its skill snapshot, but
+    // the registry is not agent state: compose the same effective list
+    // (global + project overlay for this session's working dir) that
+    // `available_skill_names` and the `list_skills` sideband op return.
+    // Fresh sessions land here while setup still owns the agent mutex, so
+    // leaving this empty hid every skill from `/` until the next History.
+    let skills = crate::skill::SkillRegistry::shared_registry()
+        .try_read()
+        .map(|global| {
+            crate::skill::SkillRegistry::effective_for_working_dir(
+                &global,
+                session.working_dir.as_deref().map(std::path::Path::new),
+            )
+            .list()
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect()
+        })
+        .unwrap_or_default();
     drop(session);
 
     let messages = rendered_messages
@@ -658,7 +677,7 @@ async fn send_history_from_persisted_session(
         available_models: Vec::new(),
         available_model_routes: Vec::new(),
         mcp_servers: Vec::new(),
-        skills: Vec::new(),
+        skills,
         total_tokens: optional_total_tokens(token_usage_totals),
         token_usage_totals: optional_token_usage_totals(token_usage_totals),
         all_sessions,

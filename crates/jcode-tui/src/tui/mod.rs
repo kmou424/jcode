@@ -509,6 +509,12 @@ pub trait TuiState {
     fn status_detail(&self) -> Option<String>;
     fn mcp_servers(&self) -> Vec<(String, usize)>;
     fn available_skills(&self) -> Vec<String>;
+    /// Description to show for a skill in `/help` and `/` candidates;
+    /// `None` means no metadata is available and callers fall back to a
+    /// generic "Activate skill" label.
+    fn skill_description_for_display(&self, _name: &str) -> Option<String> {
+        None
+    }
     /// Authoritative active credential (OAuth vs API key) for a dual-auth
     /// provider, as resolved from the live provider / remote server rather than
     /// from the `JCODE_RUNTIME_PROVIDER` env var. The header must prefer this
@@ -541,7 +547,7 @@ pub trait TuiState {
         self.elapsed()
     }
     fn status(&self) -> ProcessingStatus;
-    fn command_suggestions(&self) -> Vec<(String, &'static str)>;
+    fn command_suggestions(&self) -> Vec<(String, String)>;
     /// Invalidate any per-frame memo backing [`Self::command_suggestions`].
     ///
     /// Called once at the top of each rendered frame. The suggestion list is
@@ -1774,6 +1780,14 @@ pub(crate) fn ssh_remote_host() -> Option<String> {
 
 pub(crate) fn is_ssh_remote() -> bool {
     ssh_remote_host().is_some()
+}
+
+/// Whether the remote `jcode server stdio` bridge advertised the sideband
+/// client-op protocol in its handshake. Set by `ssh run` from the
+/// `NativeHandshake.sideband_ops` field as `JCODE_SSH_OPS=1`; older remote
+/// binaries omit the field and ops callers fail fast instead of hanging.
+pub(crate) fn ssh_ops_supported() -> bool {
+    is_ssh_remote() && std::env::var_os("JCODE_SSH_OPS").is_some_and(|v| v == "1")
 }
 
 pub(crate) fn subscribe_metadata(

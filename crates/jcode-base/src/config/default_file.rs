@@ -4,6 +4,17 @@ use std::path::PathBuf;
 impl Config {
     /// Create a default config file with comments
     pub fn create_default_config_file() -> anyhow::Result<PathBuf> {
+        if super::remote_config_override_active() {
+            // Remote-primary mode: queue the template for `write_config`
+            // delivery to the daemon rather than touching the local file.
+            super::queue_remote_config_write(Self::default_config_file_contents());
+            return Self::path().ok_or_else(|| anyhow::anyhow!("No config path"));
+        }
+        if super::ssh_remote_active() {
+            // Remote-primary, pre-seed: same queue path, no local write.
+            super::queue_remote_config_write(Self::default_config_file_contents());
+            return Self::path().ok_or_else(|| anyhow::anyhow!("No config path"));
+        }
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         if let Some(parent) = path.parent() {

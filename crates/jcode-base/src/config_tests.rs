@@ -1689,3 +1689,29 @@ fn anthropic_cache_preference_persists_and_preserves_other_settings() {
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
 }
+
+#[test]
+fn remote_config_override_wins_over_local_cache() {
+    let _lock = crate::storage::lock_test_env();
+    let local = crate::config::config();
+    let local_model = local.provider.default_model.clone();
+
+    let mut remote = Config::default();
+    remote.provider.default_model = Some("remote-model".to_string());
+    crate::config::set_remote_config_override(Some(remote));
+
+    assert!(crate::config::remote_config_override_active());
+    assert_eq!(
+        crate::config::config().provider.default_model.as_deref(),
+        Some("remote-model"),
+        "config() must serve the remote override, not the local cache"
+    );
+
+    crate::config::set_remote_config_override(None);
+    assert!(!crate::config::remote_config_override_active());
+    assert_eq!(
+        crate::config::config().provider.default_model.as_deref(),
+        local_model.as_deref(),
+        "clearing the override must restore local config reads"
+    );
+}
