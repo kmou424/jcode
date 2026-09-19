@@ -57,6 +57,26 @@ mod tests {
     }
 
     #[test]
+    fn ssh_onboarding_flag_disabled_suppresses_probe_and_offer() {
+        with_app(|app| {
+            let path = crate::config::Config::path().expect("config path");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "[features]\nssh_login_import_offer = false\n").unwrap();
+            crate::config::invalidate_config_cache();
+
+            // No status probe is spawned and no offer can appear.
+            assert!(!app.poll_ssh_login_onboarding());
+            assert!(app.remote_login_onboarding.task.is_none());
+            assert!(app.remote_login.is_none());
+            assert!(app.inline_interactive_state.is_none());
+
+            // Restore the default config so no state leaks into other tests.
+            std::fs::remove_file(&path).unwrap();
+            crate::config::invalidate_config_cache();
+        });
+    }
+
+    #[test]
     fn ssh_onboarding_offers_once_and_no_opens_normal_login_without_copying() {
         with_app(|app| {
             queue_empty_status(app);
@@ -197,6 +217,13 @@ fn remote_has_no_logins(providers: &[super::command::ProviderStatus]) -> bool {
 impl App {
     pub(in crate::tui::app) fn poll_ssh_login_onboarding(&mut self) -> bool {
         if !crate::tui::is_ssh_remote() || self.remote_login_onboarding.checked {
+            return false;
+        }
+        // `features.ssh_login_import_offer = false` suppresses the startup
+        // import suggestion entirely — no status probe, no popup. The explicit
+        // `/login --import-local` path is unaffected.
+        if !crate::config::config().features.ssh_login_import_offer {
+            self.remote_login_onboarding.dismiss();
             return false;
         }
         // Never steal a draft, interrupt a running turn, or replace another UI.
