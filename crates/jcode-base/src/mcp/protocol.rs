@@ -188,8 +188,7 @@ pub struct ResourceContent {
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
-    /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
-    /// not yet support (such entries are skipped at load time).
+    /// Command for stdio servers. Empty for HTTP/SSE servers.
     #[serde(default)]
     pub command: String,
     #[serde(default)]
@@ -201,15 +200,16 @@ pub struct McpServerConfig {
     /// Stateful servers (Playwright browser) should not be shared.
     #[serde(default = "default_shared")]
     pub shared: bool,
-    /// Transport type from Claude Code configs ("stdio", "http", "sse"). Used
-    /// only to recognize and skip non-stdio servers; defaults to stdio.
+    /// Transport type (Claude Code / pi-agent compat): "stdio", "http",
+    /// "streamable-http", "sse", "remote", "auto". Defaults to stdio when a
+    /// command is present, otherwise auto-detected HTTP when only a url is set.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    /// URL for HTTP/SSE servers (Claude Code compat). Unused by jcode today.
+    /// URL for HTTP/SSE servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Headers for HTTP/SSE servers (Claude Code compat). Unused by jcode today,
-    /// but retained so environment expansion is ready when those transports are.
+    /// Headers for HTTP/SSE servers. Values support `${VAR}` env expansion and
+    /// `!{cmd}` command substitution (e.g. `!{pass show mcp/token}`).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub headers: std::collections::HashMap<String, String>,
     /// Whether this server is enabled (default: true). Disabled servers stay
@@ -227,20 +227,72 @@ pub struct McpServerConfig {
     /// extraction) can raise it here (issues #802, #1174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Per-request timeout in milliseconds; `timeout_secs` wins when both
+    /// are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+    /// `true` (default) injects the server's tools as direct `mcp__*` tools.
+    /// `false` keeps them out of the direct surface — discoverable through
+    /// `mcp_search` and callable on demand, which keeps the model context
+    /// small for large catalogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<bool>,
+}
+
+/// Resolved transport for a server config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransportKind {
+    /// stdio child process.
+    Stdio,
+    /// Streamable HTTP family. The era (2026-07-28 per-request metadata vs
+    /// 2025 session-based) is detected per-server at connect time.
+    Http,
+    /// Deprecated 2024-11-05 HTTP+SSE transport; skips era probing.
+    LegacySse,
 }
 
 impl McpServerConfig {
-    /// jcode currently only supports stdio (command-based) MCP servers. A config
-    /// entry is stdio when it has a command and is not explicitly an http/sse
-    /// transport.
-    pub fn is_stdio(&self) -> bool {
-        if let Some(t) = &self.transport {
-            let t = t.to_ascii_lowercase();
-            if t == "http" || t == "sse" || t == "streamable-http" {
-                return false;
+    /// Resolve the effective transport, or `None` for entries jcode cannot
+    /// run (unknown transport type, or no command and no url).
+    pub fn transport_kind(&self) -> Option<McpTransportKind> {
+        match self.transport.as_deref().map(str::to_ascii_lowercase) {
+            Some(ref t) if t == "stdio" => Some(McpTransportKind::Stdio),
+            Some(ref t) if t == "sse" => Some(McpTransportKind::LegacySse),
+            Some(ref t) if matches!(t.as_str(), "http" | "streamable-http" | "remote" | "auto") => {
+                Some(McpTransportKind::Http)
+            }
+            Some(_) => None,
+            None => {
+                if !self.command.trim().is_empty() {
+                    Some(McpTransportKind::Stdio)
+                } else if self
+                    .url
+                    .as_deref()
+                    .map(|url| !url.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    Some(McpTransportKind::Http)
+                } else {
+                    None
+                }
             }
         }
-        !self.command.trim().is_empty()
+    }
+
+    /// Whether jcode can run this server (any supported transport).
+    pub fn is_supported(&self) -> bool {
+        self.transport_kind().is_some()
+    }
+
+    /// Whether this is a stdio (command-based) server.
+    pub fn is_stdio(&self) -> bool {
+        self.transport_kind() == Some(McpTransportKind::Stdio)
+    }
+
+    /// Whether this server's tools are exposed to the model
+    /// (`direct`, default true).
+    pub fn exposes_tools(&self) -> bool {
+        self.direct.unwrap_or(true)
     }
 
     /// Whether this server should be spawned/connected automatically.
@@ -280,8 +332,11 @@ fn valid_environment_variable_name(name: &str) -> bool {
         && chars.all(|ch| matches!(ch, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
 }
 
-/// Expand Claude Code's documented `${VAR}` and `${VAR:-default}` syntax in a
-/// single config string. Unsupported/malformed expressions are preserved.
+/// Expand Claude Code's documented `${VAR}` and `${VAR:-default}` syntax plus
+/// `!{cmd}` command substitution (e.g. `!{pass show mcp/token}`,
+/// `!{op read op://vault/item/field}`) in a single config string.
+/// Unsupported/malformed expressions and failed commands are preserved
+/// verbatim.
 fn expand_environment_string<F>(
     value: &str,
     lookup: &F,
@@ -293,7 +348,20 @@ where
     let mut output = String::with_capacity(value.len());
     let mut remainder = value;
 
-    while let Some(start) = remainder.find("${") {
+    loop {
+        // Find the earliest `${` or `!{` marker.
+        let (start, is_command) = match (remainder.find("${"), remainder.find("!{")) {
+            (Some(env), Some(cmd)) => {
+                if env < cmd {
+                    (env, false)
+                } else {
+                    (cmd, true)
+                }
+            }
+            (Some(env), None) => (env, false),
+            (None, Some(cmd)) => (cmd, true),
+            (None, None) => break,
+        };
         output.push_str(&remainder[..start]);
         let expression_start = start + 2;
         let Some(relative_end) = remainder[expression_start..].find('}') else {
@@ -302,21 +370,29 @@ where
         };
         let end = expression_start + relative_end;
         let expression = &remainder[expression_start..end];
-        let (variable, default) = match expression.split_once(":-") {
-            Some((variable, default)) => (variable, Some(default)),
-            None => (expression, None),
-        };
         let literal = &remainder[start..=end];
 
-        if !valid_environment_variable_name(variable) {
-            output.push_str(literal);
-        } else if let Some(expanded) = lookup(variable) {
-            output.push_str(&expanded);
-        } else if let Some(default) = default {
-            output.push_str(default);
+        if is_command {
+            match run_substitution_command(expression) {
+                Some(stdout) => output.push_str(&stdout),
+                None => output.push_str(literal),
+            }
         } else {
-            unresolved.insert(variable.to_string());
-            output.push_str(literal);
+            let (variable, default) = match expression.split_once(":-") {
+                Some((variable, default)) => (variable, Some(default)),
+                None => (expression, None),
+            };
+
+            if !valid_environment_variable_name(variable) {
+                output.push_str(literal);
+            } else if let Some(expanded) = lookup(variable) {
+                output.push_str(&expanded);
+            } else if let Some(default) = default {
+                output.push_str(default);
+            } else {
+                unresolved.insert(variable.to_string());
+                output.push_str(literal);
+            }
         }
 
         remainder = &remainder[end + 1..];
@@ -324,6 +400,52 @@ where
 
     output.push_str(remainder);
     output
+}
+
+/// Run a `!{cmd}` config substitution via `sh -c`, returning trimmed stdout.
+/// Returns `None` — leaving the literal in place — on spawn failure, non-zero
+/// exit, or timeout. The 10s deadline keeps a blocking keychain/CLI helper
+/// from hanging config load.
+fn run_substitution_command(command: &str) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Drain stdout on a thread so a chatty command cannot fill the pipe and
+    // deadlock the poll loop.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let buf = reader.join().ok()?;
+                return Some(String::from_utf8_lossy(&buf).trim_end().to_string());
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 impl McpConfig {
@@ -523,6 +645,8 @@ impl McpConfig {
                             enabled: None,
                             disabled: None,
                             timeout_secs: None,
+                            request_timeout_ms: None,
+                            direct: None,
                         },
                     );
                 }
@@ -676,16 +800,15 @@ impl McpConfig {
         // support receives already-expanded URLs and headers as well.
         merged.expand_environment_variables();
 
-        // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
-        // in Claude Code configs) so they don't fail to spawn, but log them so
-        // the omission is visible.
+        // Drop entries jcode cannot run (unknown transport type, or neither
+        // command nor url), but log them so the omission is visible.
         merged.servers.retain(|name, cfg| {
-            let keep = cfg.is_stdio();
+            let keep = cfg.is_supported();
             if !keep {
                 crate::logging::info(&format!(
-                    "MCP: Skipping non-stdio server '{}' ({}); HTTP/SSE transports are not yet supported",
+                    "MCP: Skipping unsupported server '{}' ({}); supported transports are stdio, http/streamable-http, sse",
                     name,
-                    cfg.transport.as_deref().unwrap_or("http")
+                    cfg.transport.as_deref().unwrap_or("no command/url")
                 ));
             }
             keep
@@ -706,8 +829,8 @@ impl McpConfig {
     ) {
         for (name, cfg) in incoming {
             if let Some(current) = existing.get(&name)
-                && current.is_stdio()
-                && !cfg.is_stdio()
+                && current.is_supported()
+                && !cfg.is_supported()
             {
                 crate::logging::info(&format!(
                     "MCP: Keeping existing stdio server '{}'; ignoring {} definition from a lower-precedence config",

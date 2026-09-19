@@ -854,6 +854,14 @@ async fn send_history_with_guard(
             *mcp_map.entry(server.to_string()).or_default() += 1;
         }
     }
+    // Merge shared-pool live counts so `direct: false` (search-only) servers
+    // report their real tool count; registered `mcp__*` names above already
+    // cover direct servers and session-owned connections.
+    if let Some(pool) = crate::mcp::get_shared_pool() {
+        for (server, count) in pool.tool_counts().await {
+            mcp_map.entry(server).or_insert(count);
+        }
+    }
     let mcp_servers: Vec<String> = mcp_map
         .into_iter()
         .map(|(name, count)| format!("{name}:{count}"))

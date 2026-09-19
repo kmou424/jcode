@@ -259,11 +259,13 @@ impl App {
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
                 // Cache server names with tool counts
                 let servers = manager.connected_servers().await;
-                let all_tools = manager.all_tools().await;
+                // Count the unfiltered live set so `direct: false`
+                // (search-only) servers report their real tool count.
+                let connected = manager.connected_tools().await;
                 self.mcp_server_names = servers
                     .into_iter()
                     .map(|name| {
-                        let count = all_tools.iter().filter(|(s, _)| s == &name).count();
+                        let count = connected.iter().filter(|(s, _)| s == &name).count();
                         (name, count)
                     })
                     .collect();
