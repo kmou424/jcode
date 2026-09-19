@@ -272,6 +272,11 @@ pub enum ReasoningDisplayMode {
     /// Show only the *current* reasoning live; collapse it once the model
     /// commits an assistant message or tool call, then show the next one.
     Current,
+    /// Claude Code-style compact: while reasoning streams, show a
+    /// `✻ thinking…` header followed by dim+italic reasoning text; once the
+    /// model commits an assistant message or runs a tool, collapse the whole
+    /// block to a one-line `✻ thought for Ns` trace.
+    Compact,
 }
 
 impl ReasoningDisplayMode {
@@ -280,13 +285,15 @@ impl ReasoningDisplayMode {
             Self::Off => "Off",
             Self::Full => "Full",
             Self::Current => "Current",
+            Self::Compact => "Compact",
         }
     }
 
     pub fn cycle(self) -> Self {
         match self {
             Self::Off => Self::Current,
-            Self::Current => Self::Full,
+            Self::Current => Self::Compact,
+            Self::Compact => Self::Full,
             Self::Full => Self::Off,
         }
     }
@@ -296,6 +303,7 @@ impl ReasoningDisplayMode {
             "off" | "none" | "false" | "0" | "no" => Some(Self::Off),
             "full" | "all" | "true" | "1" | "yes" | "on" => Some(Self::Full),
             "current" | "live" | "ephemeral" | "collapse" => Some(Self::Current),
+            "compact" | "claude" | "cc" => Some(Self::Compact),
             _ => None,
         }
     }
@@ -1691,5 +1699,52 @@ mod reasoning_display_defaults_tests {
         display.set_reasoning_display(ReasoningDisplayMode::Off);
         assert!(display.has_explicit_reasoning_display());
         assert!(!display.show_thinking);
+    }
+
+    #[test]
+    fn compact_reasoning_display_parse_label_and_cycle() {
+        // `compact` is the Claude Code-style collapse: `claude`/`cc` are
+        // accepted aliases for people looking for "the Claude Code one".
+        for spelling in ["compact", "Compact", " compact ", "claude", "cc"] {
+            assert_eq!(
+                ReasoningDisplayMode::parse(spelling),
+                Some(ReasoningDisplayMode::Compact),
+                "{spelling:?} must parse to Compact"
+            );
+        }
+        assert_eq!(ReasoningDisplayMode::parse("bogus"), None);
+        assert_eq!(ReasoningDisplayMode::Compact.label(), "Compact");
+
+        // The cycle inserts Compact between Current and Full:
+        // Off -> Current -> Compact -> Full -> Off.
+        assert_eq!(
+            ReasoningDisplayMode::Off.cycle(),
+            ReasoningDisplayMode::Current
+        );
+        assert_eq!(
+            ReasoningDisplayMode::Current.cycle(),
+            ReasoningDisplayMode::Compact
+        );
+        assert_eq!(
+            ReasoningDisplayMode::Compact.cycle(),
+            ReasoningDisplayMode::Full
+        );
+        assert_eq!(
+            ReasoningDisplayMode::Full.cycle(),
+            ReasoningDisplayMode::Off
+        );
+    }
+
+    #[test]
+    fn compact_reasoning_display_round_trips_through_config_serde() {
+        // `reasoning_display = "compact"` in config.toml must deserialize via
+        // the lowercase serde rename (the lenient optional path), and the
+        // explicit-mode flag must be set so front-ends do not override it.
+        let display: DisplayConfig =
+            serde_json::from_str(r#"{"reasoning_display": "compact"}"#).expect("display config");
+        assert!(display.has_explicit_reasoning_display());
+        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Compact);
+        // Compact shows reasoning, so the provider request flag stays on.
+        assert!(display.reasoning_enabled());
     }
 }

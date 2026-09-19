@@ -1049,6 +1049,12 @@ pub struct App {
     // closed reasoning block back out of the stream in place, keeping any answer
     // text that preceded it in order.
     reasoning_block_start: Option<usize>,
+    // Wall-clock duration (seconds) of the reasoning block that most recently
+    // finished. Captured at `ThinkingEnd`/`ThinkingDone` on the local turn path
+    // and at `ReasoningDone` on the remote path, then consumed by `compact`
+    // reasoning display to render the `✻ thought for Ns` collapsed trace.
+    // Reset when a new reasoning region opens.
+    reasoning_close_duration_secs: Option<f64>,
     // Reasoning traces anchored during the current turn (`current`
     // reasoning-display mode). Each entry tracks the display index plus the
     // transcript's wrapped-line total when it anchored, so stale traces can be

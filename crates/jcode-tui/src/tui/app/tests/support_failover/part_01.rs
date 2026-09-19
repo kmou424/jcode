@@ -461,6 +461,18 @@ fn with_reasoning_current_home<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
+/// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
+/// `compact` (the Claude Code-style collapse: live `✻ thinking…` header plus
+/// dim/italic reasoning, then a one-line `✻ thought for Ns` trace).
+fn with_reasoning_compact_home<T>(f: impl FnOnce() -> T) -> T {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Compact)
+            .expect("pin reasoning display to compact for the test config");
+        crate::config::invalidate_config_cache();
+        f()
+    })
+}
+
 fn create_jcode_repo_fixture() -> tempfile::TempDir {
     let temp = tempfile::TempDir::new().expect("temp repo");
     std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");

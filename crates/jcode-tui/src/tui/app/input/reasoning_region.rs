@@ -13,9 +13,29 @@
 use super::floor_char_boundary;
 use crate::tui::app::{App, DisplayMessage};
 
+/// Live header shown at the top of a `compact` reasoning block while thinking
+/// streams. Claude Code-style glyph (`✻`, U+273B) with the lowercase phrasing
+/// this mode uses throughout (`thinking…`/`thought for`). It is emitted through
+/// the same sentinel-wrapped dim+italic markup as the reasoning body so it
+/// renders identically and collapses away with the rest of the block.
+const COMPACT_REASONING_LIVE_HEADER: &str = "✻ thinking…";
+
+/// One-line collapsed label for a `compact` reasoning block: `✻ thought for
+/// N.Ns` (lowercase, one decimal place, rounded up so a real duration never
+/// displays as `0.0s`). Missing/invalid durations render as bare `✻ thought`
+/// rather than a fake `0.0s`.
+fn compact_reasoning_summary_label(duration_secs: Option<f64>) -> String {
+    match duration_secs.filter(|s| s.is_finite() && *s > 0.0) {
+        Some(secs) => format!("✻ thought for {:.1}s", (secs * 10.0).ceil() / 10.0),
+        None => "✻ thought".to_string(),
+    }
+}
+
 impl App {
     /// Begin a reasoning region. Reasoning renders as dim, italic text (no
-    /// blockquote gutter, no header, no footer). Idempotent while open.
+    /// blockquote gutter, no footer). `compact` mode prepends the Claude
+    /// Code-style `✻ thinking…` header line; other modes have no header.
+    /// Idempotent while open.
     pub(in crate::tui::app) fn open_reasoning_region(&mut self) {
         if self.reasoning_streaming {
             return;
@@ -33,10 +53,25 @@ impl App {
         self.reasoning_streaming = true;
         self.reasoning_pending_line.clear();
         self.reasoning_partial_len = 0;
+        // NOTE: `reasoning_close_duration_secs` is intentionally not reset
+        // here. The paced buffer can apply the buffered reasoning characters
+        // that open this region *after* ThinkingDone/ReasoningDone already
+        // recorded the duration for this block, so clearing on open would
+        // clobber it. The close path drains the field instead.
         // Remember where this reasoning block starts in the stream so `current`
         // mode can later slice it back out in place (without disturbing any
         // preceding answer text) once the model starts answering.
         self.reasoning_block_start = Some(self.streaming.streaming_text.len());
+        if self.reasoning_compact_mode() {
+            // The header is part of the block (recorded after `block_start`), so
+            // it is sliced out with the reasoning text when the block collapses.
+            self.streaming
+                .streaming_text
+                .push_str(&jcode_tui_markdown::reasoning_line_markup(
+                    COMPACT_REASONING_LIVE_HEADER,
+                ));
+            self.refresh_split_view_if_needed();
+        }
     }
 
     /// Remove the live partial-reasoning tail (the rendered, not-yet-committed
@@ -94,10 +129,15 @@ impl App {
         self.refresh_split_view_if_needed();
     }
 
-    /// Promote the live partial line to a committed line and end the region. The
-    /// `_footer` argument is ignored (the "Thought for Xs" footer was removed);
-    /// it is kept for call-site compatibility.
-    pub(in crate::tui::app) fn close_reasoning_region(&mut self, _footer: Option<String>) {
+    /// Promote the live partial line to a committed line and end the region.
+    /// `duration_secs` is the thinking time bundled with the paced close op
+    /// (if any); the value recorded at ThinkingEnd/ThinkingDone/ReasoningDone
+    /// and finally the still-ticking `thinking_start` are the fallbacks for
+    /// closes that carry no payload.
+    pub(in crate::tui::app) fn close_reasoning_region(&mut self, duration_secs: Option<f64>) {
+        // Drain the recorded duration up-front so it belongs to this close and
+        // cannot leak into a later block, no matter which path ends the region.
+        let recorded_duration = self.reasoning_close_duration_secs.take();
         if !self.reasoning_streaming {
             return;
         }
@@ -121,6 +161,12 @@ impl App {
             self.anchor_current_reasoning_block();
             return;
         }
+        // `compact` collapses the same way but replaces the whole block with a
+        // one-line `✻ thought for Ns` summary (Claude Code style).
+        if self.reasoning_compact_mode() {
+            self.anchor_compact_reasoning_block(duration_secs.or(recorded_duration));
+            return;
+        }
 
         // Terminate the reasoning block with a blank line so following output
         // renders as a normal paragraph.
@@ -140,6 +186,16 @@ impl App {
         matches!(
             crate::config::config().display.reasoning_display(),
             crate::config::ReasoningDisplayMode::Current
+        )
+    }
+
+    /// True when the active reasoning-display mode is `compact` (Claude
+    /// Code-style: live `✻ thinking…` header + dim/italic reasoning, then a
+    /// one-line `✻ thought for Ns` trace once the block closes).
+    pub(in crate::tui::app) fn reasoning_compact_mode(&self) -> bool {
+        matches!(
+            crate::config::config().display.reasoning_display(),
+            crate::config::ReasoningDisplayMode::Compact
         )
     }
 
@@ -188,6 +244,60 @@ impl App {
                 wrapped_lines_at_anchor: crate::tui::ui::last_total_wrapped_lines(),
             });
         self.push_display_message(DisplayMessage::reasoning(block));
+        self.refresh_split_view_if_needed();
+    }
+
+    /// Slice the just-closed reasoning block out of `streaming_text` and anchor
+    /// a one-line `✻ thought for Ns` summary in its place — the `compact` mode
+    /// counterpart of [`Self::anchor_current_reasoning_block`]. The block
+    /// (live header + reasoning body) is discarded; the summary trace keeps the
+    /// block's position, stays for the rest of the turn, and is removed when
+    /// the next user prompt clears the turn's traces. `duration_secs` is the
+    /// best-known thinking time for this block (close-op payload first, then
+    /// the value recorded at ThinkingEnd/ThinkingDone/ReasoningDone).
+    pub(in crate::tui::app) fn anchor_compact_reasoning_block(
+        &mut self,
+        duration_secs: Option<f64>,
+    ) {
+        // Same byte-offset hazard as `anchor_current_reasoning_block`: snap the
+        // recorded start to a character boundary before `split_off`.
+        let block_start = self.reasoning_block_start.take().unwrap_or(0);
+        let block_start = floor_char_boundary(&self.streaming.streaming_text, block_start);
+        // The header + reasoning text collapse away entirely; only the summary
+        // line survives in the transcript.
+        let _collapsed_block = self.streaming.streaming_text.split_off(block_start);
+        while self.streaming.streaming_text.ends_with('\n') {
+            self.streaming.streaming_text.pop();
+        }
+        // Answer text that streamed *before* the block must commit first so the
+        // summary lands after it in the transcript (chronological order).
+        if !self.streaming.streaming_text.trim().is_empty() {
+            let preceding = self.take_streaming_text();
+            let preceding = self.collapse_reasoning_for_commit(preceding);
+            if !preceding.trim().is_empty() {
+                self.push_display_message(DisplayMessage::assistant(preceding));
+            }
+        }
+        // Duration priority: the value bundled with the paced close op or
+        // recorded at ThinkingEnd/ThinkingDone/ReasoningDone (already merged by
+        // the caller), then a still-ticking `thinking_start` estimate.
+        let secs = duration_secs.or_else(|| {
+            self.thinking_start
+                .map(|start| start.elapsed().as_secs_f64())
+        });
+        let label = compact_reasoning_summary_label(secs);
+        self.turn_reasoning_traces
+            .push(crate::tui::app::TurnReasoningTrace {
+                display_index: self.display_messages.len(),
+                wrapped_lines_at_anchor: crate::tui::ui::last_total_wrapped_lines(),
+            });
+        // Wrap the label in the same sentinel dim+italic markup reasoning lines
+        // use, so the trace renders like the rest of the collapsed block.
+        self.push_display_message(DisplayMessage::reasoning(
+            jcode_tui_markdown::reasoning_line_markup(&label)
+                .trim_end()
+                .to_string(),
+        ));
         self.refresh_split_view_if_needed();
     }
 

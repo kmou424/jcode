@@ -3337,8 +3337,9 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
              Modes:\n\
              • off - never show thinking text\n\
              • full - keep every thinking trace in the transcript\n\
-             • current - show only the live thinking, then collapse it once a tool runs or the answer commits\n\n\
-             Use /thinking-display <off|full|current> to change it. To change how hard the model thinks, use /effort.",
+             • current - show only the live thinking, then collapse it once a tool runs or the answer commits\n\
+             • compact - Claude Code style: '✻ thinking…' header + live thinking, then a one-line '✻ thought for Ns' trace\n\n\
+             Use /thinking-display <off|full|current|compact> to change it. To change how hard the model thinks, use /effort.",
             current.label()
         )));
         return true;
@@ -3346,7 +3347,7 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
 
     let Some(mode) = crate::config::ReasoningDisplayMode::parse(rest) else {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /thinking-display (show), then off, full, or current".to_string(),
+            "Usage: /thinking-display (show), then off, full, current, or compact".to_string(),
         ));
         return true;
     };

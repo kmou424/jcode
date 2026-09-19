@@ -807,16 +807,33 @@ impl App {
                                     }
                                     StreamEvent::ThinkingEnd => {
                                         self.pause_streaming_tps(true);
-                                        self.thinking_start = None;
+                                        // Preserve the measured thinking time
+                                        // before clearing the start marker so
+                                        // `compact` reasoning display can render
+                                        // `✻ thought for Ns` when the region
+                                        // close lands (queued behind the final
+                                        // buffered reasoning characters).
+                                        self.reasoning_close_duration_secs = self
+                                            .thinking_start
+                                            .take()
+                                            .map(|start| start.elapsed().as_secs_f64());
                                         self.thinking_buffer.clear();
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);
                                     }
-                                    StreamEvent::ThinkingDone { duration_secs: _ } => {
+                                    StreamEvent::ThinkingDone { duration_secs } => {
+                                        // Provider-measured duration wins over
+                                        // the elapsed estimate captured at
+                                        // ThinkingEnd.
+                                        self.reasoning_close_duration_secs = Some(duration_secs);
                                         if config().display.reasoning_enabled() {
                                             // Queue the region close behind any still-buffered
                                             // reasoning so it lands exactly after the final
-                                            // reasoning character reveals.
-                                            let ops = self.stream_buffer.push_close_reasoning();
+                                            // reasoning character reveals. The provider-measured
+                                            // duration rides with the marker so the compact
+                                            // summary shows it even under a long paced backlog.
+                                            let ops = self
+                                                .stream_buffer
+                                                .push_close_reasoning(Some(duration_secs));
                                             self.apply_stream_ops(ops);
                                         }
                                         self.thinking_prefix_emitted = false;
