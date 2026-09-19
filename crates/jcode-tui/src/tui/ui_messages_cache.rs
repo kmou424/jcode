@@ -24,8 +24,15 @@ where
                 .wrapping_add(crate::tui::mermaid::mermaid_inline_expand_epoch()),
             mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
             show_agentgrep_output: crate::config::config().display.show_agentgrep_output,
-            show_bash_output: crate::config::config().display.show_bash_output,
-            tool_call_details: crate::config::config().display.tool_call_details,
+            // Source these two from the same accessors the renderers consult so
+            // the key flips exactly when the rendered output would (in tests the
+            // accessors honor thread-local overrides).
+            show_bash_output: tools_ui::show_bash_output(),
+            tool_call_details: tools_ui::show_tool_call_details(),
+            reasoning_display: crate::config::config().display.reasoning_display(),
+            // Any transcript-affecting `display.*` change bumps this epoch so
+            // history re-renders under the new setting.
+            display_epoch: super::display_epoch(),
         },
         render,
     )
@@ -60,6 +67,32 @@ mod tests {
             second.len(),
             2,
             "the message cache must rerender after a Mermaid size transition"
+        );
+    }
+
+    /// A display toggle change bumps the epoch baked into the per-message
+    /// cache context. The same message must re-render under the new epoch
+    /// instead of serving lines cached against the old one.
+    #[test]
+    fn display_epoch_bump_invalidates_cached_message_lines() {
+        let msg = DisplayMessage::assistant("display epoch probe");
+
+        let first =
+            get_cached_message_lines(&msg, 80, crate::config::DiffDisplayMode::Off, |_, _, _| {
+                vec![Line::from("before")]
+            });
+        assert_eq!(first.len(), 1);
+
+        crate::tui::ui::bump_display_epoch();
+        let second =
+            get_cached_message_lines(&msg, 80, crate::config::DiffDisplayMode::Off, |_, _, _| {
+                vec![Line::from("after-1"), Line::from("after-2")]
+            });
+
+        assert_eq!(
+            second.len(),
+            2,
+            "a display epoch bump must invalidate the per-message line cache"
         );
     }
 }

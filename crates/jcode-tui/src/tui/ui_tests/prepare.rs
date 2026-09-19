@@ -1283,3 +1283,48 @@ fn test_prepare_messages_renders_anchored_reasoning_message_in_flow() {
         joined[reasoning_idx]
     );
 }
+
+/// Regression: re-rendering the transcript under a changed display toggle must
+/// produce different output for the SAME historical message. This exercises
+/// the shared `prepare_body` path the live draw uses after the display epoch
+/// invalidates the prepared-body cache.
+#[test]
+fn test_prepare_body_rerenders_same_tool_message_after_bash_output_toggle() {
+    let bash_msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "one\ntwo\nthree\nfour".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_bash_rerender".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "printf output"}),
+            intent: Some("Print output".to_string()),
+            thought_signature: None,
+        }),
+    };
+    let state = TestState {
+        display_messages: vec![bash_msg],
+        messages_version: 1,
+        ..Default::default()
+    };
+    let text_of = |prepared: &PreparedMessages| prepared.wrapped_plain_lines.join("\n");
+
+    let hidden = prepare::prepare_body(&state, 100, false);
+    let hidden_text = text_of(&hidden);
+
+    tools_ui::tests_show_bash_output_override::set(true);
+    let shown = prepare::prepare_body(&state, 100, false);
+    tools_ui::tests_show_bash_output_override::set(false);
+    let shown_text = text_of(&shown);
+
+    assert!(
+        !hidden_text.lines().any(|line| line.trim() == "four"),
+        "bash output line must stay hidden while the toggle is off: {hidden_text:?}"
+    );
+    assert!(
+        shown_text.lines().any(|line| line.trim() == "four"),
+        "the same message must re-render with output after the toggle flips: {shown_text:?}"
+    );
+}

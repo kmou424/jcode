@@ -965,6 +965,41 @@ fn update_prompt_entry_animation(
     }
 }
 
+/// Epoch identifying the current transcript-affecting display state. Every
+/// prepared-render cache key (`BodyCacheKey`, `FullPrepCacheKey`, the
+/// per-message line cache, and the assistant aux map) includes it so a change
+/// to a `display.*` toggle re-renders the whole transcript instead of serving
+/// bodies cached under the old setting.
+///
+/// The epoch folds two sources into one `u64`:
+/// - `config_reload_generation()` - bumped whenever the process config cache
+///   reloads. Slash-command setters (`/tool-call-details`,
+///   `/show-agentgrep-output`, `/thinking-display`) save the config file, which
+///   forces a reload; editing config.toml or changing `JCODE_*` env overrides
+///   reloads on the next throttled check. This covers every `display.*` field
+///   through every mutation path without hooking each setter.
+/// - `LOCAL_DISPLAY_EPOCH` - bumped by `bump_display_epoch()` for in-scope
+///   toggle mutations that do not write config (session-scoped `diff_mode`
+///   cycling via keybindings) and by tests needing a deterministic
+///   invalidation point.
+static LOCAL_DISPLAY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bump the display epoch for an in-scope toggle change that did not go
+/// through a config save. Always safe to call; it only forces cache misses.
+pub(crate) fn bump_display_epoch() {
+    LOCAL_DISPLAY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Current display epoch. Mixed into prepared-render cache keys; a change must
+/// mean "re-render history", never "reuse a stale body".
+pub(crate) fn display_epoch() -> u64 {
+    // Multiplicative mix keeps (generation, local) pairs injective for all
+    // practical values; wrapping arithmetic avoids overflow panics.
+    crate::config::config_reload_generation()
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(LOCAL_DISPLAY_EPOCH.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BodyCacheKey {
     width: u16,
@@ -972,6 +1007,11 @@ struct BodyCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    /// Display-toggle epoch: a `display.*` change (config save, config-file
+    /// hot-reload, env override, or an explicit `bump_display_epoch` at a
+    /// session-scoped toggle site) rebuilds the whole transcript under the new
+    /// setting instead of serving cached lines.
+    display_epoch: u64,
     /// Mermaid render geometry depends on the scoped transcript/pane aspect
     /// profile as well as width. A vertical terminal resize can change this
     /// bucket without changing `width`, so it must invalidate the prepared body.
@@ -1064,6 +1104,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.display_epoch == key.display_epoch
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1085,6 +1126,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.display_epoch == key.display_epoch
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1125,6 +1167,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.display_epoch == key.display_epoch
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1147,6 +1190,7 @@ impl BodyCacheState {
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
                     && entry.key.centered == key.centered
+                    && entry.key.display_epoch == key.display_epoch
                     && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
                     // Anchored inline images render inside the body, and a
                     // late-arriving image may target an already-prepared
@@ -1248,6 +1292,8 @@ struct FullPrepCacheKey {
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
     centered: bool,
+    /// Display-toggle epoch; see `BodyCacheKey::display_epoch`.
+    display_epoch: u64,
     /// The scoped Mermaid profile can also change when pane geometry changes
     /// while the transcript rectangle stays the same.
     mermaid_aspect_bucket: Option<u16>,
