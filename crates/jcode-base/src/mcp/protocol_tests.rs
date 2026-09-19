@@ -524,10 +524,11 @@ fn test_initialize_result() {
 }
 
 #[test]
-fn http_entry_does_not_displace_a_working_stdio_server_of_the_same_name() {
-    // A `type: http` entry from a lower-precedence config used to overwrite the
-    // stdio definition and then get dropped by the non-stdio filter, silently
-    // losing a working server (issue #653).
+fn runnable_http_entry_overrides_stdio_by_precedence() {
+    // HTTP transports are supported now, so a `type: http` entry from a
+    // higher-precedence config legitimately overrides the stdio definition
+    // (previously it won the merge but was dropped as unrunnable — the
+    // silent-loss bug of issue #653 can no longer occur either way).
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
     std::fs::create_dir_all(project.join(".jcode")).unwrap();
@@ -546,7 +547,31 @@ fn http_entry_does_not_displace_a_working_stdio_server_of_the_same_name() {
     let github = config
         .servers
         .get("github")
-        .expect("stdio github server must survive the http entry");
+        .expect("github server must survive the merge");
+    assert!(!github.is_stdio(), "http entry wins by precedence");
+    assert!(github.is_supported());
+}
+
+#[test]
+fn unrunnable_entry_does_not_displace_a_runnable_server() {
+    // The issue #653 guard, generalized: a definition jcode cannot run must
+    // never overwrite a working one regardless of precedence.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"type":"stdio","command":"npx"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"websocket","url":"wss://x.invalid/"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    let github = config.servers.get("github").expect("github survives");
     assert_eq!(github.command, "npx");
     assert!(github.is_stdio());
 }
@@ -595,11 +620,12 @@ fn stdio_entry_of_same_transport_still_overrides_by_precedence() {
 }
 
 #[test]
-fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
+fn claude_json_http_entry_overrides_jcode_stdio_by_precedence() {
     // The exact configuration from issue #653: `github` is stdio in
-    // ~/.jcode/mcp.json and http in ~/.claude.json. The http entry used to win
-    // the merge and then be dropped by the non-stdio filter, so a working
-    // server vanished with no indication it had been overwritten.
+    // ~/.jcode/mcp.json and http in ~/.claude.json. Now that HTTP transports
+    // are supported, the http entry legitimately wins by precedence — the
+    // original bug (silent loss of a working server) cannot recur because the
+    // entry is runnable and its tools are real.
     let _guard = crate::storage::lock_test_env();
     let original_cwd = std::env::current_dir().expect("current cwd");
     let previous_home = std::env::var_os("JCODE_HOME");
@@ -628,9 +654,9 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
         let github = merged
             .servers
             .get("github")
-            .expect("the stdio github server must survive the http entry");
-        assert_eq!(github.command, "npx");
-        assert!(github.is_stdio());
+            .expect("github server must survive the merge");
+        assert!(!github.is_stdio(), "http entry wins by precedence");
+        assert!(github.is_supported());
     });
 
     std::env::set_current_dir(original_cwd).expect("restore cwd");
@@ -862,4 +888,141 @@ fn mcp_source_logs_explain_provenance_without_config_values() {
     assert!(imported.contains("Claude Code MCP configuration remains live and was not copied"));
     assert!(!imported.contains("TOKEN"));
     assert!(!imported.contains("inline-secret"));
+}
+
+// ---------------------------------------------------------------------------
+// HTTP transport config surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_config_parses_type_and_url() {
+    let config: McpServerConfig =
+        serde_json::from_value(serde_json::json!({"type": "http", "url": "https://x/mcp"}))
+            .unwrap();
+    assert!(matches!(
+        config.transport_kind(),
+        Some(McpTransportKind::Http)
+    ));
+    assert!(!config.is_stdio());
+    assert!(config.exposes_tools());
+}
+
+#[test]
+fn http_type_aliases() {
+    for t in ["remote", "streamable-http", "auto"] {
+        let config: McpServerConfig =
+            serde_json::from_value(serde_json::json!({"type": t, "url": "https://x"})).unwrap();
+        assert!(
+            matches!(config.transport_kind(), Some(McpTransportKind::Http)),
+            "type={t} should map to Http"
+        );
+    }
+    let sse: McpServerConfig =
+        serde_json::from_value(serde_json::json!({"type": "sse", "url": "https://x"})).unwrap();
+    assert!(matches!(
+        sse.transport_kind(),
+        Some(McpTransportKind::LegacySse)
+    ));
+}
+
+#[test]
+fn direct_false_hides_tools_but_still_connects() {
+    let config: McpServerConfig = serde_json::from_value(
+        serde_json::json!({"type": "http", "url": "https://x", "direct": false}),
+    )
+    .unwrap();
+    assert!(!config.exposes_tools());
+    let config: McpServerConfig = serde_json::from_value(
+        serde_json::json!({"type": "http", "url": "https://x", "direct": true}),
+    )
+    .unwrap();
+    assert!(config.exposes_tools());
+}
+
+#[test]
+fn request_timeout_ms_field() {
+    let config: McpServerConfig = serde_json::from_value(
+        serde_json::json!({"type": "http", "url": "https://x", "request_timeout_ms": 9000}),
+    )
+    .unwrap();
+    assert_eq!(config.request_timeout_ms, Some(9000));
+    // Foreign camelCase spellings are not accepted — keep the config surface
+    // strictly snake_case.
+    let config: McpServerConfig = serde_json::from_value(
+        serde_json::json!({"type": "http", "url": "https://x", "requestTimeoutMs": 9000}),
+    )
+    .unwrap();
+    assert_eq!(config.request_timeout_ms, None);
+}
+
+#[test]
+fn pi_agent_style_config_loads() {
+    // A config in the shape of ~/.pi/agent/mcp.json must deserialize.
+    let raw = serde_json::json!({
+        "mcpServers": {
+            "anysearch": {
+                "type": "remote",
+                "url": "https://mcp.example.com/sse",
+                "headers": {"Authorization": "Bearer x"},
+                "direct": true
+            },
+            "deepwiki": {
+                "type": "http",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "lifecycle": "lazy",
+                "requestTimeoutMs": 30000,
+                "toolResultRendering": "markdown"
+            }
+        }
+    });
+    let config: McpConfig = serde_json::from_value(raw).unwrap();
+    assert!(config.servers.contains_key("anysearch"));
+    assert!(config.servers.contains_key("deepwiki"));
+    let dw = &config.servers["deepwiki"];
+    assert!(dw.is_supported());
+    // requestTimeoutMs is a foreign (pi) field — ignored, not mapped.
+    assert_eq!(dw.request_timeout_ms, None);
+}
+
+// ---------------------------------------------------------------------------
+// !{cmd} substitution in env expansion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bang_substitution_runs_command() {
+    let mut unresolved = std::collections::BTreeSet::new();
+    let out = expand_environment_string("Bearer !{printf %s mytoken}", &|_| None, &mut unresolved);
+    assert_eq!(out, "Bearer mytoken");
+    assert!(unresolved.is_empty());
+}
+
+#[test]
+fn bang_substitution_trims_and_combines() {
+    let mut unresolved = std::collections::BTreeSet::new();
+    let out = expand_environment_string("pre-!{printf 'x\n'}-post", &|_| None, &mut unresolved);
+    assert_eq!(out, "pre-x-post");
+}
+
+#[test]
+fn bang_substitution_failure_is_literal() {
+    let mut unresolved = std::collections::BTreeSet::new();
+    let out = expand_environment_string("!{exit 1}", &|_| None, &mut unresolved);
+    assert_eq!(out, "!{exit 1}");
+    let out = expand_environment_string(
+        "!{this-command-does-not-exist-xyz}",
+        &|_| None,
+        &mut unresolved,
+    );
+    assert_eq!(out, "!{this-command-does-not-exist-xyz}");
+}
+
+#[test]
+fn bang_substitution_with_env_var() {
+    let mut unresolved = std::collections::BTreeSet::new();
+    let out = expand_environment_string(
+        "${X:-d}!{printf %s y}",
+        &|k| (k == "X").then(|| "V".to_string()),
+        &mut unresolved,
+    );
+    assert_eq!(out, "Vy");
 }

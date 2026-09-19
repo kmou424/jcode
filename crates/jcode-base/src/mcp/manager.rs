@@ -295,25 +295,39 @@ impl McpManager {
         names
     }
 
-    /// Get all available tools from all connected servers
-    pub async fn all_tools(&self) -> Vec<(String, McpToolDef)> {
+    /// Get all available tools from all connected servers.
+    ///
+    /// Every tool from every connected server, ignoring `direct`.
+    pub async fn connected_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut tools = Vec::new();
-
-        // Pool handles
         for (server_name, handle) in self.pool_handles.read().await.iter() {
             for tool in handle.tools() {
                 tools.push((server_name.clone(), tool));
             }
         }
-
-        // Owned clients
         for (server_name, client) in self.owned_clients.read().await.iter() {
             for tool in client.tools() {
                 tools.push((server_name.clone(), tool));
             }
         }
-
         tools
+    }
+
+    /// Servers configured `direct: false` stay connected and discoverable
+    /// via `mcp_search` but are not injected as direct `mcp__*` tools.
+    pub async fn all_tools(&self) -> Vec<(String, McpToolDef)> {
+        let exposes = |name: &str| {
+            self.config
+                .servers
+                .get(name)
+                .map(|c| c.exposes_tools())
+                .unwrap_or(true)
+        };
+        self.connected_tools()
+            .await
+            .into_iter()
+            .filter(|(server, _)| exposes(server))
+            .collect()
     }
 
     /// Get the best available MCP tool catalog for deferred discovery.
@@ -322,6 +336,9 @@ impl McpManager {
     /// that are still connecting. This preserves advertise-early behavior for
     /// the fixed `mcp_search` surface without changing `all_tools()`, whose
     /// callers intentionally operate on connected servers only.
+    ///
+    /// `direct: false` servers belong here: their tools are discoverable via
+    /// `mcp_search` but never injected as direct `mcp__*` tools.
     pub async fn searchable_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut tools: BTreeMap<(String, String), McpToolDef> = BTreeMap::new();
         let schema_cache = super::McpSchemaCache::load();
@@ -338,8 +355,10 @@ impl McpManager {
         }
 
         // Insert live definitions last so schema changes discovered during this
-        // session replace stale cache entries immediately.
-        for (server, tool) in self.all_tools().await {
+        // session replace stale cache entries immediately. Live tools come
+        // from the unfiltered connected set so `direct: false` servers stay
+        // searchable even though they are not injected as direct tools.
+        for (server, tool) in self.connected_tools().await {
             tools.insert((server.clone(), tool.name.clone()), tool);
         }
 
@@ -392,9 +411,7 @@ impl McpManager {
         {
             let mut handles = self.pool_handles.write().await;
             if handles.remove(server).is_some() {
-                crate::logging::warn(&format!(
-                    "MCP: shared server '{server}' died, reconnecting"
-                ));
+                crate::logging::warn(&format!("MCP: shared server '{server}' died, reconnecting"));
                 if let Some(pool) = &self.pool {
                     pool.disconnect_server(server).await;
                 }
@@ -403,9 +420,7 @@ impl McpManager {
         {
             let mut clients = self.owned_clients.write().await;
             if let Some(mut client) = clients.remove(server) {
-                crate::logging::warn(&format!(
-                    "MCP: owned server '{server}' died, reconnecting"
-                ));
+                crate::logging::warn(&format!("MCP: owned server '{server}' died, reconnecting"));
                 client.shutdown().await;
             }
         }
@@ -651,6 +666,8 @@ mod tests {
                 enabled: Some(false),
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -686,6 +703,8 @@ mod tests {
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -794,6 +813,8 @@ done
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             },
         );
         let manager = McpManager::with_config(config.clone());
@@ -825,5 +846,76 @@ done
 
         manager.disconnect_all().await;
         drop(env_guard);
+    }
+    #[tokio::test]
+    async fn direct_false_keeps_tools_searchable_but_not_injected() {
+        // `direct: false` means the server's tools stay out of `all_tools`
+        // (the direct `mcp__*` registration surface) while remaining in
+        // `searchable_tools` for `mcp_search` discovery.
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "hidden".to_string(),
+            McpServerConfig {
+                command: "unused".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                shared: false,
+                transport: None,
+                url: None,
+                headers: std::collections::HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: None,
+                request_timeout_ms: None,
+                direct: Some(false),
+            },
+        );
+        config.servers.insert(
+            "shown".to_string(),
+            McpServerConfig {
+                command: "unused".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                shared: false,
+                transport: None,
+                url: None,
+                headers: std::collections::HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
+            },
+        );
+        let manager = McpManager::with_config(config);
+
+        // Inject fake pool handles with one tool each.
+        let fake_tool = McpToolDef {
+            name: "echo".to_string(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        for name in ["hidden", "shown"] {
+            let (handle, _rx) = McpHandle::new_channel(name, std::time::Duration::from_secs(30));
+            handle
+                .tools
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(fake_tool.clone());
+            manager
+                .pool_handles
+                .write()
+                .await
+                .insert(name.to_string(), handle);
+        }
+
+        let direct = manager.all_tools().await;
+        assert_eq!(direct.len(), 1, "direct tools exclude direct:false");
+        assert_eq!(direct[0].0, "shown");
+
+        let searchable = manager.searchable_tools().await;
+        let names: Vec<_> = searchable.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(names.contains(&"shown"));
+        assert!(names.contains(&"hidden"), "direct:false stays searchable");
     }
 }

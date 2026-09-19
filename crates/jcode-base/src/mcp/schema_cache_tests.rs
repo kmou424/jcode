@@ -17,6 +17,8 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
         enabled: None,
         disabled: None,
         timeout_secs: None,
+        request_timeout_ms: None,
+        direct: None,
     }
 }
 

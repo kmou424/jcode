@@ -289,6 +289,15 @@ impl SharedMcpPool {
         tools
     }
 
+    /// Live tool counts per connected server (unfiltered by `direct`).
+    pub async fn tool_counts(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for (server, _) in self.all_tools().await {
+            *counts.entry(server).or_insert(0) += 1;
+        }
+        counts
+    }
+
     /// Get list of connected server names
     pub async fn connected_servers(&self) -> Vec<String> {
         let handles = self.handles.read().await;
@@ -626,6 +635,8 @@ mod tests {
             enabled: None,
             disabled: None,
             timeout_secs: Some(2),
+            request_timeout_ms: None,
+            direct: None,
         };
 
         // Leader attempt in a background task so we can cancel it.
@@ -674,11 +685,8 @@ mod tests {
         // observable by late subscribers (Shared future), not Notify.
         let notify = Arc::new(tokio::sync::Notify::new());
         notify.notify_waiters(); // fires before any waiter future exists
-        let missed = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            notify.notified(),
-        )
-        .await;
+        let missed =
+            tokio::time::timeout(std::time::Duration::from_millis(50), notify.notified()).await;
         assert!(
             missed.is_err(),
             "notify_waiters unexpectedly woke a future created after the wake"
@@ -704,6 +712,8 @@ mod tests {
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             },
         );
         let pool = Arc::new(SharedMcpPool::new(config));
