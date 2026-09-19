@@ -74,6 +74,7 @@ impl Config {
 - Persist memory injections: {}
 - KV cache miss notices: {}
 - Update channel: {}
+- SSH login import offer: {}
 
 **Tools:**
 - Profile: {}
@@ -230,6 +231,7 @@ impl Config {
             self.features.persist_memory_injections,
             self.features.kv_cache_miss_notices,
             self.features.update_channel,
+            self.features.ssh_login_import_offer,
             if self.tools.profile.trim().is_empty() {
                 "full"
             } else {
