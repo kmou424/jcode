@@ -102,6 +102,9 @@ pub struct SshPreviewMessage {
     pub tool_calls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Wall-clock thinking time (seconds) on `role="reasoning"` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
 }
 
 /// One skill descriptor returned by `list_skills` — the same fields a
@@ -443,6 +446,7 @@ fn op_session_preview(session_id: &str) -> SshOpOutcome {
                     content: message.content,
                     tool_calls: message.tool_calls,
                     timestamp: None,
+                    duration_secs: message.duration_secs,
                 })
                 .collect()
         })

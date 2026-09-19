@@ -205,11 +205,12 @@ impl DisplayMessage {
         }
     }
 
-    /// Create a display-only reasoning trace (the ephemeral `current`/`compact`
-    /// reasoning-display modes). The content is sentinel-wrapped dim/italic
-    /// markup — the anchored reasoning block (`current`) or the one-line
-    /// `✻ thought for Ns` summary (`compact`) — and is excluded from
-    /// provider/model context.
+    /// Create a display-only reasoning message. The content is the full
+    /// sentinel-wrapped dim/italic block markup (regardless of the mode that
+    /// produced it) so render-time mode gating can show the text, the compact
+    /// `✻ thought for Ns` label, or nothing, and mode toggles re-render the
+    /// same data. `duration_secs` is the block's thinking time when known.
+    /// Reasoning messages are excluded from provider/model context.
     pub fn reasoning(content: impl Into<String>) -> Self {
         Self {
             role: "reasoning".to_string(),
@@ -221,13 +222,20 @@ impl DisplayMessage {
         }
     }
 
+    /// Reasoning message with the block's measured thinking duration.
+    pub fn reasoning_with_duration(content: impl Into<String>, duration_secs: Option<f64>) -> Self {
+        let mut msg = Self::reasoning(content);
+        msg.duration_secs = duration_secs.map(|secs| secs as f32);
+        msg
+    }
+
     /// Convert the shared session renderer output into the TUI transcript model.
     pub fn from_rendered_message(item: RenderedMessage) -> Self {
         Self {
             role: item.role,
             content: item.content,
             tool_calls: item.tool_calls,
-            duration_secs: None,
+            duration_secs: item.duration_secs.map(|secs| secs as f32),
             title: None,
             tool_data: item.tool_data,
         }

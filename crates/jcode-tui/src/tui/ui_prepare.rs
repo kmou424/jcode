@@ -25,6 +25,9 @@ struct AssistantAuxKey {
     centered: bool,
     diff_mode: crate::config::DiffDisplayMode,
     cached_len: usize,
+    /// Display-toggle epoch: the aux map derives from toggle-sensitive
+    /// rendered lines, so a toggle change must re-derive it.
+    display_epoch: u64,
 }
 
 const ASSISTANT_AUX_CACHE_LIMIT: usize = 2048;
@@ -86,6 +89,9 @@ fn assistant_aux_data(
         centered,
         diff_mode,
         cached_len: cached.len(),
+        // `cached` and the derived plain lines are display-toggle-sensitive,
+        // so the aux map must re-derive under a new display epoch.
+        display_epoch: super::display_epoch(),
     };
 
     {
@@ -671,6 +677,7 @@ pub(super) fn prepare_messages(
             .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
+        display_epoch: super::display_epoch(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
@@ -1120,6 +1127,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
             .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
+        display_epoch: super::display_epoch(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         pin_images: app.pin_images(),
         inline_images_visible: app.inline_images_visible(),
@@ -1391,6 +1399,23 @@ fn render_message_into(
         return;
     }
     let align = default_message_alignment(role, centered);
+
+    // Reasoning rows carry their data unconditionally; the *current*
+    // `reasoning_display` mode decides whether this row emits anything at all:
+    // `off` hides every reasoning row, `current` hides rows whose turn is over
+    // (no longer registered in `turn_reasoning_traces`). Returning before the
+    // separator blank keeps hidden rows from leaving stray spacing behind.
+    if role == "reasoning" {
+        match crate::tui::ui::reasoning_display_mode() {
+            crate::config::ReasoningDisplayMode::Off => return,
+            crate::config::ReasoningDisplayMode::Current
+                if !ctx.app.reasoning_row_is_live(msg_global_idx) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+    }
 
     if (acc.body_has_content || !acc.lines.is_empty())
         && role != "tool"

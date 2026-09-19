@@ -76,7 +76,7 @@ fn test_convert_blocks_content() {
         _ => panic!("Expected text"),
     }
     match &blocks[1] {
-        ContentBlock::Reasoning { text } => assert_eq!(text, "let me think"),
+        ContentBlock::Reasoning { text, .. } => assert_eq!(text, "let me think"),
         _ => panic!("Expected reasoning"),
     }
     match &blocks[2] {

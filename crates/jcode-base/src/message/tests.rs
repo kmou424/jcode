@@ -770,10 +770,17 @@ fn parse_background_task_notification_markdown_extracts_fields() -> Result<()> {
 fn push_reasoning_blocks_always_captures_history() {
     // seal/claude-api (replay disabled) must still persist a history trace.
     let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "anthropic", "thinking about X", None, false);
+    push_reasoning_blocks(
+        &mut blocks,
+        "anthropic",
+        "thinking about X",
+        None,
+        false,
+        None,
+    );
     assert_eq!(blocks.len(), 1);
     match &blocks[0] {
-        ContentBlock::ReasoningTrace { text } => assert_eq!(text, "thinking about X"),
+        ContentBlock::ReasoningTrace { text, .. } => assert_eq!(text, "thinking about X"),
         other => panic!("expected ReasoningTrace, got {other:?}"),
     }
 }
@@ -787,6 +794,7 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
         "signed thought",
         Some("sig"),
         true,
+        None,
     );
     // Signed thinking is replayable AND readable, so no extra trace is needed.
     assert_eq!(blocks.len(), 1);
@@ -806,7 +814,14 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
 fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
     let mut blocks = Vec::new();
     // Replay requested but no signature: cannot replay, must still keep history.
-    push_reasoning_blocks(&mut blocks, "anthropic", "unsigned thought", None, true);
+    push_reasoning_blocks(
+        &mut blocks,
+        "anthropic",
+        "unsigned thought",
+        None,
+        true,
+        None,
+    );
     assert_eq!(blocks.len(), 1);
     assert!(matches!(blocks[0], ContentBlock::ReasoningTrace { .. }));
 }
@@ -816,10 +831,10 @@ fn push_reasoning_blocks_openai_keeps_readable_trace() {
     let mut blocks = Vec::new();
     // OpenAI native reasoning is encrypted/unreadable, so a readable trace is
     // always added for history regardless of replay setting.
-    push_reasoning_blocks(&mut blocks, "openai", "openai reasoning", None, true);
+    push_reasoning_blocks(&mut blocks, "openai", "openai reasoning", None, true, None);
     assert_eq!(blocks.len(), 1);
     match &blocks[0] {
-        ContentBlock::ReasoningTrace { text } => assert_eq!(text, "openai reasoning"),
+        ContentBlock::ReasoningTrace { text, .. } => assert_eq!(text, "openai reasoning"),
         other => panic!("expected ReasoningTrace, got {other:?}"),
     }
 }
@@ -827,7 +842,7 @@ fn push_reasoning_blocks_openai_keeps_readable_trace() {
 #[test]
 fn push_reasoning_blocks_openrouter_replay_is_readable() {
     let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "openrouter", "or reasoning", None, true);
+    push_reasoning_blocks(&mut blocks, "openrouter", "or reasoning", None, true, None);
     // OpenRouter stores a readable Reasoning block, which doubles as history.
     assert_eq!(blocks.len(), 1);
     assert!(matches!(blocks[0], ContentBlock::Reasoning { .. }));
@@ -836,7 +851,7 @@ fn push_reasoning_blocks_openrouter_replay_is_readable() {
 #[test]
 fn push_reasoning_blocks_skips_empty() {
     let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "anthropic", "", None, false);
+    push_reasoning_blocks(&mut blocks, "anthropic", "", None, false, None);
     assert!(blocks.is_empty());
 }
 
@@ -844,12 +859,13 @@ fn push_reasoning_blocks_skips_empty() {
 fn reasoning_trace_serde_round_trip() {
     let block = ContentBlock::ReasoningTrace {
         text: "persisted reasoning".to_string(),
+        duration_secs: None,
     };
     let json = serde_json::to_string(&block).expect("serialize");
     assert!(json.contains("\"type\":\"reasoning_trace\""), "json={json}");
     let parsed: ContentBlock = serde_json::from_str(&json).expect("deserialize");
     match parsed {
-        ContentBlock::ReasoningTrace { text } => assert_eq!(text, "persisted reasoning"),
+        ContentBlock::ReasoningTrace { text, .. } => assert_eq!(text, "persisted reasoning"),
         other => panic!("expected ReasoningTrace, got {other:?}"),
     }
 }

@@ -83,7 +83,9 @@ fn test_expand_badge_shortcut_toggles_inline_diff_and_pulses_key() {
 
 #[test]
 fn test_alt_shift_i_toggles_inline_images_and_persists() {
-    // App setup also takes the render lock, so always acquire env first.
+    // Take the env lock before the render lock so the acquisition order
+    // matches env-using tests that take env first then render; the opposite
+    // order deadlocks when they are co-scheduled.
     let _env_guard = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
     let temp = tempfile::tempdir().expect("tempdir");

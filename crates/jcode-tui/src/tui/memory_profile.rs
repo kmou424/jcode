@@ -196,7 +196,8 @@ impl ProviderMessageMemoryStats {
                     self.text_bytes += text.len();
                     self.record_bytes(text.len());
                 }
-                ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text } => {
+                ContentBlock::Reasoning { text, .. }
+                | ContentBlock::ReasoningTrace { text, .. } => {
                     self.reasoning_bytes += text.len();
                     self.record_bytes(text.len());
                 }
