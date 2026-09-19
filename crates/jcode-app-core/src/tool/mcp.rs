@@ -464,7 +464,19 @@ impl McpManagementTool {
                 .collect();
 
             if server_tools.is_empty() {
-                output.push_str("  (no tools)\n");
+                let search_only = manager
+                    .config()
+                    .servers
+                    .get(server)
+                    .map(|c| !c.exposes_tools())
+                    .unwrap_or(false);
+                if search_only {
+                    output.push_str(
+                        "  (search-only: tools hidden from direct injection; discover via mcp_search)\n",
+                    );
+                } else {
+                    output.push_str("  (no tools)\n");
+                }
             } else {
                 for ((_, tool), fallback) in server_tools {
                     let name = self
@@ -524,6 +536,8 @@ impl McpManagementTool {
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             }
         } else {
             let manager = self.manager.read().await;
@@ -907,6 +921,8 @@ mod tests {
                 enabled: Some(false),
                 disabled: None,
                 timeout_secs: None,
+                request_timeout_ms: None,
+                direct: None,
             },
         );
         let manager = Arc::new(RwLock::new(McpManager::with_config(config)));

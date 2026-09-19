@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -18,31 +18,113 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 pub struct McpHandle {
     pub(crate) name: String,
     request_id: Arc<AtomicU64>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
-    writer_tx: mpsc::Sender<String>,
+    pub(crate) pending: PendingMap,
+    pub(crate) writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
-    tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
+    /// Tool list shared with the HTTP transport task for `x-mcp-header`
+    /// argument mirroring (Mcp-Param-* headers).
+    pub(crate) tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
+    /// Modern-era (2026-07-28+) `_meta` block injected into every request
+    /// body's params. `None` for legacy-era and stdio-legacy connections.
+    request_meta: Arc<std::sync::RwLock<Option<Value>>>,
     /// Reply timeout applied to every request on this server.
     request_timeout: std::time::Duration,
+    /// Liveness flag for transports without a killable child: HTTP transport
+    /// tasks clear it on hard transport failures so the next call reconnects.
+    alive: Arc<AtomicBool>,
 }
+
+/// Pending request waiters keyed by JSON-RPC id; transport reader tasks
+/// complete them as responses arrive.
+pub(crate) type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
 
 /// Default reply timeout when a server config does not set `timeout_secs`.
 pub const DEFAULT_MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolve the per-request reply timeout for a server config.
 pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
+    if let Some(secs) = config.timeout_secs.filter(|secs| *secs > 0) {
+        return std::time::Duration::from_secs(secs);
+    }
     config
-        .timeout_secs
-        .filter(|secs| *secs > 0)
-        .map(std::time::Duration::from_secs)
+        .request_timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
         .unwrap_or(DEFAULT_MCP_REQUEST_TIMEOUT)
 }
 
 impl McpHandle {
+    /// Build the request plumbing shared by all transports: a handle plus the
+    /// outbound-message receiver the transport writer task consumes.
+    pub(crate) fn new_channel(
+        name: &str,
+        request_timeout: std::time::Duration,
+    ) -> (Self, mpsc::Receiver<String>) {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (writer_tx, writer_rx) = mpsc::channel::<String>(32);
+        (
+            Self {
+                name: name.to_string(),
+                request_id: Arc::new(AtomicU64::new(1)),
+                pending,
+                writer_tx,
+                server_info: Arc::new(std::sync::RwLock::new(None)),
+                capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
+                tools: Arc::new(std::sync::RwLock::new(Vec::new())),
+                request_meta: Arc::new(std::sync::RwLock::new(None)),
+                request_timeout,
+                alive: Arc::new(AtomicBool::new(true)),
+            },
+            writer_rx,
+        )
+    }
+
+    /// Route a decoded JSON-RPC response to its pending waiter.
+    pub(crate) async fn resolve_pending(pending: &PendingMap, response: JsonRpcResponse) {
+        if let Some(id) = response.id {
+            let mut pending = pending.lock().await;
+            if let Some(tx) = pending.remove(&id) {
+                let _ = tx.send(response);
+            }
+        }
+    }
+
+    /// Mark this connection dead. Used by transports without a killable child
+    /// (HTTP) when a request hits a hard transport failure; the next tool call
+    /// sees `is_alive() == false` and reconnects.
+    pub(crate) fn mark_dead(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
+    /// Modern-era `_meta` injection: every request carries the negotiated
+    /// protocol version and client identity in `params._meta`.
+    pub(crate) fn set_request_meta(&self, meta: Value) {
+        *self
+            .request_meta
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(meta);
+    }
+
     /// Send a request and wait for response
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        // Inject modern-era `_meta` when the connection negotiated it.
+        let params = match self
+            .request_meta
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            Some(meta) => {
+                let mut params = params.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                if let Value::Object(map) = &mut params {
+                    map.insert("_meta".to_string(), meta);
+                }
+                Some(params)
+            }
+            None => params,
+        };
         let request = JsonRpcRequest::new(id, method, params);
 
         let (tx, rx) = oneshot::channel();
@@ -127,12 +209,11 @@ impl McpHandle {
             .clone()
     }
 
-    /// True while the writer channel is open, i.e. the server process still
-    /// has a live stdin pipe. When the child dies the writer task exits and
-    /// the channel closes; a dead handle makes every call fail, so callers
-    /// should treat it as disconnected and reconnect.
+    /// True while the connection is usable: the writer channel is open and
+    /// no transport task has flagged a hard failure. A dead handle makes every
+    /// call fail, so callers should treat it as disconnected and reconnect.
     pub fn is_alive(&self) -> bool {
-        !self.writer_tx.is_closed()
+        self.alive.load(Ordering::SeqCst) && !self.writer_tx.is_closed()
     }
 
     /// Refresh the list of available tools
@@ -151,12 +232,16 @@ impl McpHandle {
     }
 }
 
-/// MCP Client - owns the child process and provides shared handles.
-/// Only one McpClient exists per MCP server process, but many McpHandle
+/// MCP Client - owns the server connection and provides shared handles.
+/// Only one McpClient exists per MCP server, but many McpHandle
 /// clones can be distributed to different sessions.
 pub struct McpClient {
     handle: McpHandle,
-    child: Child,
+    /// Present for stdio transports; HTTP servers have no child process.
+    child: Option<Child>,
+    /// Present for HTTP/SSE transports; owns the transport tasks and session
+    /// state for shutdown.
+    http: Option<super::http::HttpConnection>,
 }
 
 impl McpClient {
@@ -169,11 +254,15 @@ impl McpClient {
     ///
     /// The working directory is only applied when it exists; otherwise the
     /// subprocess falls back to inheriting the current process cwd (issue #557).
+    /// HTTP/SSE servers ignore it — there is no subprocess.
     pub async fn connect_in_dir(
         name: String,
         config: &McpServerConfig,
         working_dir: Option<&std::path::Path>,
     ) -> Result<Self> {
+        if !config.is_stdio() {
+            return super::http::connect(name, config).await;
+        }
         let working_dir = working_dir.filter(|dir| dir.is_dir());
         crate::logging::info(&format!(
             "MCP: Connecting to '{}' ({} {:?}) cwd={:?}",
@@ -229,9 +318,8 @@ impl McpClient {
         });
 
         // Setup channels
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (writer_tx, mut writer_rx) = mpsc::channel::<String>(32);
+        let (handle, mut writer_rx) = McpHandle::new_channel(&name, request_timeout_for(config));
+        let pending = Arc::clone(&handle.pending);
 
         // Spawn writer task
         let mut stdin = stdin;
@@ -261,12 +349,7 @@ impl McpClient {
                     }
                     Ok(_) => {
                         if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                            if let Some(id) = response.id {
-                                let mut pending = pending_clone.lock().await;
-                                if let Some(tx) = pending.remove(&id) {
-                                    let _ = tx.send(response);
-                                }
-                            }
+                            McpHandle::resolve_pending(&pending_clone, response).await;
                         } else {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
@@ -285,18 +368,11 @@ impl McpClient {
             }
         });
 
-        let handle = McpHandle {
-            name: name.clone(),
-            request_id: Arc::new(AtomicU64::new(1)),
-            pending,
-            writer_tx,
-            server_info: Arc::new(std::sync::RwLock::new(None)),
-            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
-            tools: Arc::new(std::sync::RwLock::new(Vec::new())),
-            request_timeout: request_timeout_for(config),
+        let mut client = Self {
+            handle,
+            child: Some(child),
+            http: None,
         };
-
-        let mut client = Self { handle, child };
 
         client
             .initialize()
@@ -323,16 +399,45 @@ impl McpClient {
         self.handle.clone()
     }
 
-    /// Initialize the MCP connection
-    async fn initialize(&mut self) -> Result<()> {
-        let params = InitializeParams {
-            protocol_version: "2024-11-05".to_string(),
+    /// Build the legacy-era initialize params shared by stdio and HTTP probes.
+    pub(crate) fn initialize_params() -> InitializeParams {
+        InitializeParams {
+            // Latest initialization-era revision; servers negotiate down.
+            protocol_version: "2025-11-25".to_string(),
             capabilities: ClientCapabilities::default(),
             client_info: ClientInfo {
                 name: "jcode".to_string(),
                 version: jcode_build_meta::pkg_version().to_string(),
             },
-        };
+        }
+    }
+
+    /// Apply an `InitializeResult` obtained by the caller (stdio request or
+    /// the HTTP connect probe) to the handle's server info/capabilities.
+    pub(crate) fn apply_initialize_result(&self, init_result: InitializeResult) {
+        *self
+            .handle
+            .server_info
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
+        *self
+            .handle
+            .capabilities
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.capabilities;
+    }
+
+    /// Send `notifications/initialized` (legacy-era connections only).
+    pub(crate) async fn send_initialized(&self) -> Result<()> {
+        let notif = JsonRpcNotification::new("notifications/initialized", None);
+        let msg = serde_json::to_string(&notif)? + "\n";
+        self.handle.writer_tx.send(msg).await?;
+        Ok(())
+    }
+
+    /// Initialize the MCP connection
+    pub(crate) async fn initialize(&mut self) -> Result<()> {
+        let params = Self::initialize_params();
 
         let response = self
             .handle
@@ -341,32 +446,32 @@ impl McpClient {
 
         if let Some(result) = response.result {
             let init_result: InitializeResult = serde_json::from_value(result)?;
-            *self
-                .handle
-                .server_info
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
-            *self
-                .handle
-                .capabilities
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.capabilities;
+            self.apply_initialize_result(init_result);
         }
 
-        // Send initialized notification
-        let notif = JsonRpcNotification::new("notifications/initialized", None);
-        let msg = serde_json::to_string(&notif)? + "\n";
-        self.handle.writer_tx.send(msg).await?;
+        self.send_initialized().await
+    }
 
-        Ok(())
+    /// Build a client backed by an HTTP/SSE transport connection.
+    pub(crate) fn from_http(handle: McpHandle, http: super::http::HttpConnection) -> Self {
+        Self {
+            handle,
+            child: None,
+            http: Some(http),
+        }
     }
 
     /// Check if server is still running
     pub fn is_running(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(_)) => false,
-            Err(_) => false,
+        match &mut self.child {
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => false,
+                Err(_) => false,
+            },
+            // HTTP transports have no child; the transport task marks the
+            // handle dead on hard failures.
+            None => self.handle.is_alive(),
         }
     }
 
@@ -379,6 +484,10 @@ impl McpClient {
 
     /// Shutdown the server
     pub async fn shutdown(&mut self) {
+        if let Some(http) = self.http.take() {
+            http.shutdown().await;
+            return;
+        }
         let _ = self
             .handle
             .writer_tx
@@ -387,7 +496,9 @@ impl McpClient {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let _ = self.child.kill().await;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill().await;
+        }
     }
 
     // === Legacy compatibility methods that delegate to handle ===
@@ -443,7 +554,9 @@ fn mcp_child_env(
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -515,6 +628,8 @@ done
             enabled: None,
             disabled: None,
             timeout_secs: None,
+            request_timeout_ms: None,
+            direct: None,
         }
     }
 

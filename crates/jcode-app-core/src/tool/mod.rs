@@ -27,6 +27,7 @@ pub mod mcp;
 mod memory;
 mod multiedit;
 mod open;
+mod panel;
 mod patch;
 mod read;
 pub mod selfdev;
@@ -34,7 +35,6 @@ pub(crate) mod serde_coerce;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
-mod panel;
 mod skill;
 mod todo;
 mod webfetch;
@@ -1350,8 +1350,12 @@ impl Registry {
                 for (server, cfg) in &config_servers {
                     if let Some(cached) = schema_cache.tools_for(server, cfg) {
                         advertised_tool_count += cached.len();
-                        cached_tools
-                            .extend(cached.iter().cloned().map(|tool| (server.clone(), tool)));
+                        // `direct: false` servers stay discoverable via
+                        // mcp_search but are never injected as proxies.
+                        if cfg.exposes_tools() {
+                            cached_tools
+                                .extend(cached.iter().cloned().map(|tool| (server.clone(), tool)));
+                        }
                         advertised_servers.insert(server.clone());
                     }
                 }
@@ -1411,12 +1415,13 @@ impl Registry {
 
                 // Register MCP server tools and collect server info
                 let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
+                // Status counts come from the unfiltered live set so
+                // `direct: false` (search-only) servers report their real
+                // tool count in the hint instead of 0.
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
-                for (_, tool) in &tools {
-                    if let Some((server, _)) = tool.mcp_identity() {
-                        *server_counts.entry(server.to_string()).or_default() += 1;
-                    }
+                for (server, _) in mcp_manager.read().await.connected_tools().await {
+                    *server_counts.entry(server).or_insert(0) += 1;
                 }
                 let connected = mcp_manager.read().await.connected_servers().await;
                 registry.refresh_mcp_tools(tools, &connected).await;
@@ -1438,7 +1443,9 @@ impl Registry {
                             String,
                             Vec<crate::mcp::McpToolDef>,
                         > = std::collections::BTreeMap::new();
-                        for (server, def) in manager.all_tools().await {
+                        // Cache the unfiltered live set so `direct: false`
+                        // tools stay searchable after a cold start.
+                        for (server, def) in manager.connected_tools().await {
                             grouped.entry(server).or_default().push(def);
                         }
                         let configs = manager
