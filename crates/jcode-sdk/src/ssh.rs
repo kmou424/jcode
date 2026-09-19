@@ -270,9 +270,7 @@ impl SshConnectOptions {
             // fish: `set PATH a b $PATH` assigns a path list, exported
             // colon-joined. `PATH="...$PATH"` POSIX syntax is a fish error.
             RemoteShell::Fish => "set PATH \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" $PATH; ",
-            RemoteShell::Posix => {
-                "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; "
-            }
+            RemoteShell::Posix => "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; ",
         }
     }
 
@@ -339,9 +337,10 @@ impl SshConnectOptions {
         let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
         let deadline = std::time::Instant::now() + timeout;
         let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| {
-                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
-            })? {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}")))?
+            {
                 break status;
             }
             if std::time::Instant::now() >= deadline {

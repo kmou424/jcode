@@ -74,6 +74,14 @@ async fn run_unix(args: Args) -> Result<()> {
     crate::env::set_var("JCODE_SSH_REMOTE", host);
     crate::env::set_var("JCODE_SSH_BINARY", binary);
     crate::env::set_var("JCODE_SSH_WORKING_DIR", &working_dir);
+    // sideband ops capability, advertised by the remote bridge's
+    // handshake. Older remote binaries omit it and TUI client ops degrade
+    // to a fast, explicit failure instead of waiting on a reply.
+    if connection.handshake().sideband_ops {
+        crate::env::set_var("JCODE_SSH_OPS", "1");
+    } else {
+        crate::env::remove_var("JCODE_SSH_OPS");
+    }
     if let Some(socket) = args.ssh_server_socket.as_deref() {
         crate::env::set_var("JCODE_SSH_SERVER_SOCKET", socket);
     } else {

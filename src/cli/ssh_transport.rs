@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -47,6 +47,11 @@ pub(crate) struct NativeHandshake {
     pub version: String,
     pub working_dir: String,
     pub socket_path: String,
+    /// The bridge carries the client-op sideband protocol. Older
+    /// remote binaries omit the field — clients treat absent as false and
+    /// degrade to pure pass-through instead of failing the attach.
+    #[serde(default)]
+    pub sideband_ops: bool,
 }
 
 /// Lifetime guard for the private socket and all its SSH children.
@@ -412,6 +417,7 @@ impl SshConnection {
                 version: String::new(),
                 working_dir: String::new(),
                 socket_path: String::new(),
+                sideband_ops: false,
             },
         })
     }
@@ -566,24 +572,75 @@ async fn accept_connections(
 
 /// CLI-only stdin/stdout bridge to an already-running persistent native server.
 pub(crate) async fn run_stdio(socket: PathBuf) -> Result<()> {
-    use std::io::Write;
     // Tokio stdin is uncancellable and can keep runtime shutdown alive after
     // daemon death while SSH still holds stdin open. A plain thread cannot.
-    let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
-    input.set_nonblocking(true)?;
-    let input = UnixStream::from_std(input)?;
+    // Read stdin line-by-line here: daemon requests are JSONL, and sideband
+    // ops must be intercepted per line before forwarding.
+    let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     std::thread::Builder::new()
         .name("native-ssh-stdin".into())
         .spawn(move || {
-            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut writer);
-            let _ = writer.flush();
-            let _ = writer.shutdown(std::net::Shutdown::Write);
+            use std::io::BufRead;
+            let mut stdin = std::io::stdin().lock();
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match stdin.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if line_tx.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
         })?;
-    bridge_stream(input, tokio::io::stdout(), socket).await
+    bridge_stream(line_rx, tokio::io::stdout(), socket).await
 }
 
-async fn bridge_stream<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    mut input: R,
+/// Feed an async byte stream into the bridge's line channel, one message
+/// per newline-delimited frame.
+#[cfg(test)]
+fn line_feed<R: tokio::io::AsyncRead + Send + Unpin + 'static>(
+    input: R,
+) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut input = BufReader::new(input);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            // `tx.closed()` resolves when the bridge drops the receiver —
+            // exit then so the stream's read half drops too and the peer
+            // observes EOF (a blocked `read_until` alone never notices).
+            tokio::select! {
+                _ = tx.closed() => break,
+                read = input.read_until(b'\n', &mut line) => {
+                    match read {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if tx.send(line.clone()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Route client traffic between stdin/stdout and the daemon socket:
+///
+/// - upload: each client line classified by the sideband prefix — op lines
+///   are executed locally by the bridge (`ssh_ops::execute`), everything
+///   else forwards to the daemon verbatim;
+/// - download: daemon lines forward verbatim (with an `all_sessions`
+///   liveness snoop for `list_sessions`), and op replies merge into the
+///   same stdout writer task so lines never interleave.
+async fn bridge_stream<W: AsyncWrite + Unpin>(
+    mut input: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     mut output: W,
     socket: PathBuf,
 ) -> Result<()> {
@@ -599,6 +656,7 @@ async fn bridge_stream<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         version: jcode_build_meta::version().to_string(),
         working_dir: std::env::current_dir()?.to_string_lossy().into_owned(),
         socket_path: socket.to_string_lossy().into_owned(),
+        sideband_ops: true,
     };
     let mut header = serde_json::to_vec(&handshake)?;
     header.push(b'\n');
@@ -607,14 +665,86 @@ async fn bridge_stream<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
     output.write_all(&header).await?;
     output.flush().await?;
+
+    let ctx = std::sync::Arc::new(std::sync::Mutex::new(crate::ssh_ops::SshOpContext {
+        working_dir: handshake.working_dir.clone(),
+        ..Default::default()
+    }));
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    // Upload: client lines → daemon socket or the sideband executor.
+    let upload_ctx = std::sync::Arc::clone(&ctx);
+    let upload = async move {
+        while let Some(line) = input.recv().await {
+            if crate::ssh_ops::is_op_line(&line) {
+                let text = String::from_utf8_lossy(&line).into_owned();
+                match crate::ssh_ops::decode_request(text.trim_end()) {
+                    Ok(request) => {
+                        let ctx = std::sync::Arc::clone(&upload_ctx);
+                        let reply_tx = reply_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let response = {
+                                let ctx =
+                                    ctx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                crate::ssh_ops::execute(request, &ctx)
+                            };
+                            if let Ok(mut encoded) = crate::ssh_ops::encode_response(&response) {
+                                encoded.push('\n');
+                                let _ = reply_tx.send(encoded.into_bytes());
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "native SSH: dropping malformed sideband op line: {error}"
+                        ));
+                    }
+                }
+                continue;
+            }
+            write.write_all(&line).await?;
+        }
+        // A shell pipeline closes stdin after its last request. Forward that
+        // half-close but do not discard replies already in flight.
+        write.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    // Download: daemon lines → stdout, snooping `all_sessions`; op replies
+    // merge into the same writer task.
+    let download_ctx = std::sync::Arc::clone(&ctx);
+    // Borrows `output` so the caller can flush after the pump ends; the
+    // future is pinned inside the select block and dropped with it.
+    let download = async {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            tokio::select! {
+                read = read.read_until(b'\n', &mut line) => {
+                    match read {
+                        Ok(0) | Err(_) => return Ok::<(), anyhow::Error>(()),
+                        Ok(_) => {
+                            if let Ok(text) = std::str::from_utf8(&line) {
+                                let mut ctx = download_ctx
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                crate::ssh_ops::snoop_live_sessions(text, &mut ctx);
+                            }
+                            output.write_all(&line).await?;
+                        }
+                    }
+                }
+                reply = reply_rx.recv() => {
+                    match reply {
+                        Some(reply) => output.write_all(&reply).await?,
+                        None => {}
+                    }
+                }
+            }
+        }
+    };
+
     {
-        let upload = async {
-            tokio::io::copy(&mut input, &mut write).await?;
-            // A shell pipeline closes stdin after its last request. Forward
-            // that half-close but do not discard replies already in flight.
-            write.shutdown().await
-        };
-        let download = tokio::io::copy(&mut read, &mut output);
         tokio::pin!(upload, download);
         tokio::select! {
             result = &mut upload => {
@@ -643,6 +773,7 @@ mod tests {
             version: "test-build".into(),
             working_dir: "/remote/home".into(),
             socket_path: "/remote/native.sock".into(),
+            sideband_ops: true,
         })
         .unwrap()
             + "\n"
@@ -877,7 +1008,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let (client, bridge) = tokio::io::duplex(4096);
         let (input, output) = tokio::io::split(bridge);
-        let task = tokio::spawn(bridge_stream(input, output, socket));
+        let task = tokio::spawn(bridge_stream(line_feed(input), output, socket));
         let (daemon, _) = listener.accept().await.unwrap();
         let (read, mut write) = daemon.into_split();
         let mut read = BufReader::new(read);
@@ -922,9 +1053,13 @@ mod tests {
         let (input, output) = tokio::io::split(bridge);
         let directory = tempfile::tempdir().unwrap();
         assert!(
-            bridge_stream(input, output, directory.path().join("missing.sock"))
-                .await
-                .is_err()
+            bridge_stream(
+                line_feed(input),
+                output,
+                directory.path().join("missing.sock")
+            )
+            .await
+            .is_err()
         );
         let mut client = client;
         let mut output = Vec::new();
@@ -939,7 +1074,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let (client, bridge) = tokio::io::duplex(4096);
         let (input, output) = tokio::io::split(bridge);
-        let task = tokio::spawn(bridge_stream(input, output, socket));
+        let task = tokio::spawn(bridge_stream(line_feed(input), output, socket));
         let (daemon, _) = listener.accept().await.unwrap();
         let (read, mut write) = daemon.into_split();
         let mut read = BufReader::new(read);

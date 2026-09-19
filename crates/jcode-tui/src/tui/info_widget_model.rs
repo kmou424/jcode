@@ -42,7 +42,10 @@ struct RuntimeRow {
 impl RuntimeRow {
     fn into_line(self, max_len: usize) -> Line<'static> {
         Line::from(vec![
-            Span::styled(format!("{} ", self.icon), Style::default().fg(self.icon_color)),
+            Span::styled(
+                format!("{} ", self.icon),
+                Style::default().fg(self.icon_color),
+            ),
             Span::styled(
                 truncate_smart(&self.text, max_len.saturating_sub(2)),
                 Style::default().fg(self.text_color),
@@ -154,7 +157,12 @@ mod tests {
     fn text(lines: Vec<Line<'static>>) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -166,7 +174,10 @@ mod tests {
         d.tokens_per_second = Some(61.7);
         let out = text(render_model_widget(&d, Rect::new(0, 0, 30, 8)));
         for owned in ["GPT", "codex", "high", "(hi)", "openai", "OAuth", "jcode"] {
-            assert!(!out.contains(owned), "{owned:?} belongs to the status line: {out}");
+            assert!(
+                !out.contains(owned),
+                "{owned:?} belongs to the status line: {out}"
+            );
         }
         assert!(out.contains("fast tier"), "{out}");
         assert!(out.contains("websocket"), "{out}");

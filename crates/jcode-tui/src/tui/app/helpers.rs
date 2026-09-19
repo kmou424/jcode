@@ -835,6 +835,46 @@ pub(super) fn spawn_in_new_terminal(
     spawn_command_in_new_terminal(exe, &args, &title, cwd)
 }
 
+/// Rebuild the argv that attaches a new window to `session_id` over SSH,
+/// reproducing this client's `--ssh` flags from the env vars the attach path
+/// set (`JCODE_SSH_REMOTE`, `JCODE_SSH_BINARY`, `JCODE_SSH_SERVER_SOCKET`).
+/// `--remote-working-dir` is deliberately not forwarded: the session carries
+/// its own remote working_dir.
+pub(super) fn ssh_resume_args(session_id: &str) -> Option<Vec<String>> {
+    let host = crate::tui::ssh_remote_host()?;
+    let mut args = vec!["--ssh".to_string(), host];
+    for (flag, variable) in [
+        ("--ssh-binary", "JCODE_SSH_BINARY"),
+        ("--ssh-server-socket", "JCODE_SSH_SERVER_SOCKET"),
+    ] {
+        if let Some(value) = std::env::var(variable)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    args.push("--resume".to_string());
+    args.push(session_id.to_string());
+    Some(args)
+}
+
+/// Open the remote `session_id` in a new terminal window attached over SSH.
+/// Returns Ok(false) when not in SSH mode or no supported terminal exists.
+pub(super) fn spawn_ssh_session_in_new_terminal(
+    exe: &Path,
+    session_id: &str,
+    cwd: &Path,
+) -> anyhow::Result<bool> {
+    let Some(args) = ssh_resume_args(session_id) else {
+        return Ok(false);
+    };
+    let title = resumed_window_title(session_id);
+    spawn_command_in_new_terminal(exe, &args, &title, cwd)
+}
+
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod helpers_tests;
@@ -1497,7 +1537,12 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
     let mut added_total = 0usize;
     let mut removed_total = 0usize;
     for file in &mut all_files {
-        let key = file.path.rsplit(" -> ").next().unwrap_or(&file.path).trim_matches('"');
+        let key = file
+            .path
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or(&file.path)
+            .trim_matches('"');
         let abs = repo_root.as_ref().map(|root| root.join(key));
         if file.status == '?' {
             file.added = abs.as_deref().and_then(count_text_lines);
@@ -1593,7 +1638,11 @@ fn count_text_lines(path: &std::path::Path) -> Option<usize> {
         return None;
     }
     let lines = bytes.iter().filter(|&&b| b == b'\n').count();
-    Some(if bytes.last().is_some_and(|&b| b != b'\n') { lines + 1 } else { lines })
+    Some(if bytes.last().is_some_and(|&b| b != b'\n') {
+        lines + 1
+    } else {
+        lines
+    })
 }
 
 /// Collapse a porcelain `XY` pair into the single letter the Changes widget

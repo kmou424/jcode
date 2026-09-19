@@ -966,7 +966,10 @@ async fn comm_message_cross_swarm_dm_by_label() {
             HashSet::from(["beta-coord".to_string(), "beta-worker".to_string()]),
         ),
     ])));
-    let live: HashSet<String> = ["swarm-a", "swarm-b"].iter().map(|s| s.to_string()).collect();
+    let live: HashSet<String> = ["swarm-a", "swarm-b"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     crate::server::swarm_labels::set_swarm_label("swarm-b", "Backend", &live).unwrap();
 
     let sessions = Arc::new(RwLock::new(HashMap::new()));
@@ -1034,7 +1037,11 @@ async fn comm_message_cross_swarm_dm_by_label() {
     assert!(beta_worker_rx.try_recv().is_err());
 
     // Label + friendly name: delivered to that agent.
-    send!(3, Some("beta-worker".to_string()), Some("swarm-b".to_string()));
+    send!(
+        3,
+        Some("beta-worker".to_string()),
+        Some("swarm-b".to_string())
+    );
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 3 })

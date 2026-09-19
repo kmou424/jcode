@@ -74,13 +74,15 @@ pub(super) fn agent_model_target_config_path(target: AgentModelTarget) -> &'stat
 }
 
 pub(super) fn load_agent_model_override(target: AgentModelTarget) -> Option<String> {
-    let cfg = crate::config::Config::load();
+    // Read the effective config (remote override under SSH) rather than the
+    // local file — spawned agents run on the daemon side this session drives.
+    let cfg = crate::config::config();
     match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model,
-        AgentModelTarget::Review => cfg.autoreview.model,
-        AgentModelTarget::Judge => cfg.autojudge.model,
-        AgentModelTarget::Memory => cfg.agents.memory_model,
-        AgentModelTarget::Ambient => cfg.ambient.model,
+        AgentModelTarget::Swarm => cfg.agents.swarm_model.clone(),
+        AgentModelTarget::Review => cfg.autoreview.model.clone(),
+        AgentModelTarget::Judge => cfg.autojudge.model.clone(),
+        AgentModelTarget::Memory => cfg.agents.memory_model.clone(),
+        AgentModelTarget::Ambient => cfg.ambient.model.clone(),
     }
 }
 
@@ -88,7 +90,7 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
+    let mut cfg = crate::config::Config::load_for_update()?;
     let value = model
         .map(str::trim)
         .filter(|value| !value.is_empty())

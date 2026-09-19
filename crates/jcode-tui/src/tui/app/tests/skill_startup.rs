@@ -54,7 +54,10 @@ fn startup_skill_commands(app: &mut App, input: &str) -> Vec<String> {
     app.advance_command_suggestions_epoch();
     app.command_suggestions()
         .into_iter()
-        .filter(|(_, help)| *help == "Activate skill")
+        .filter(|(command, _)| {
+            !crate::tui::app::state_ui_input_helpers::registered_command_entries()
+                .any(|(name, _)| *name == *command)
+        })
         .map(|(command, _)| command)
         .collect()
 }

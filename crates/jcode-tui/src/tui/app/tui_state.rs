@@ -754,6 +754,10 @@ impl crate::tui::TuiState for App {
         }
     }
 
+    fn skill_description_for_display(&self, name: &str) -> Option<String> {
+        App::skill_description_for_display(self, name)
+    }
+
     fn streaming_tokens(&self) -> (u64, u64) {
         (
             self.streaming.streaming_input_tokens,
@@ -817,7 +821,7 @@ impl crate::tui::TuiState for App {
             .or_else(|| self.elapsed())
     }
 
-    fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+    fn command_suggestions(&self) -> Vec<(String, String)> {
         App::command_suggestions(self)
     }
 

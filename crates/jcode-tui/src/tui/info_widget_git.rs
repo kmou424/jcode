@@ -81,7 +81,11 @@ pub(crate) fn is_agent_edited(
     let Some(root) = repo_root else {
         return false;
     };
-    let rel = repo_path.rsplit(" -> ").next().unwrap_or(repo_path).trim_matches('"');
+    let rel = repo_path
+        .rsplit(" -> ")
+        .next()
+        .unwrap_or(repo_path)
+        .trim_matches('"');
     edited.contains(&root.join(rel.trim_end_matches('/')))
 }
 
@@ -174,10 +178,7 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         let dim = Style::default().fg(rgb(100, 100, 115));
         let mut spans = vec![Span::styled(format!("  +{hidden} more"), dim)];
         if info.added_total + info.removed_total > 0 {
-            let totals = format!(
-                "+{} −{} all",
-                info.added_total, info.removed_total
-            );
+            let totals = format!("+{} −{} all", info.added_total, info.removed_total);
             let used = 2 + format!("+{hidden} more").chars().count();
             let pad = w.saturating_sub(used + totals.chars().count());
             if pad >= 1 {
@@ -245,7 +246,11 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
     ];
     if show_counts {
         let (a, r) = line_counts(file).unwrap_or_default();
-        let this_w = if a.is_empty() { 0 } else { a.chars().count() + 1 + r.chars().count() };
+        let this_w = if a.is_empty() {
+            0
+        } else {
+            a.chars().count() + 1 + r.chars().count()
+        };
         let pad = width.saturating_sub(PREFIX + name_len + this_w);
         spans.push(Span::raw(" ".repeat(pad)));
         if !a.is_empty() {
@@ -301,7 +306,12 @@ mod tests {
     fn text(lines: &[Line<'static>]) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -321,8 +331,14 @@ mod tests {
         let out = text(&render_git_widget(&data, Rect::new(0, 0, 30, 5)));
         assert!(out.contains("M  turn_execution.rs"), "{out}");
         assert!(out.contains("?  notes.md"), "{out}");
-        assert!(!out.contains("main"), "branch belongs to the status line: {out}");
-        assert!(!out.contains("↑1"), "counts belong to the status line: {out}");
+        assert!(
+            !out.contains("main"),
+            "branch belongs to the status line: {out}"
+        );
+        assert!(
+            !out.contains("↑1"),
+            "counts belong to the status line: {out}"
+        );
     }
 
     #[test]
@@ -346,7 +362,10 @@ mod tests {
 
     #[test]
     fn display_path_keeps_parent_for_generic_names_and_rename_targets() {
-        assert_eq!(changes_display_path("crates/a/src/tool/mod.rs"), "tool/mod.rs");
+        assert_eq!(
+            changes_display_path("crates/a/src/tool/mod.rs"),
+            "tool/mod.rs"
+        );
         assert_eq!(changes_display_path("src/foo.rs"), "foo.rs");
         assert_eq!(changes_display_path("old.rs -> new/place.rs"), "place.rs");
         assert_eq!(changes_display_path("scratch/"), "scratch/");
@@ -382,7 +401,9 @@ mod tests {
         let data = InfoWidgetData {
             git_info: Some(git),
             agent_edited: std::sync::Arc::new(
-                [root.join("src/agent/turn_execution.rs")].into_iter().collect(),
+                [root.join("src/agent/turn_execution.rs")]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -396,14 +417,19 @@ mod tests {
         assert!(rows[0].ends_with("+84 −12"), "{rows:#?}");
         assert!(rows[1].ends_with("+264 −8"), "{rows:#?}");
         for r in &rows {
-            assert_eq!(unicode_width::UnicodeWidthStr::width(r.as_str()), 32, "{r:?}");
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(r.as_str()),
+                32,
+                "{r:?}"
+            );
         }
     }
 
     #[test]
     fn overflow_row_reports_totals_across_all_files() {
-        let files: Vec<DirtyFile> =
-            (0..10).map(|i| DirtyFile::new('M', format!("f{i}.rs")).with_lines(1, 1)).collect();
+        let files: Vec<DirtyFile> = (0..10)
+            .map(|i| DirtyFile::new('M', format!("f{i}.rs")).with_lines(1, 1))
+            .collect();
         let data = InfoWidgetData {
             git_info: Some(GitInfo {
                 dirty_files: files,
@@ -415,8 +441,17 @@ mod tests {
             ..Default::default()
         };
         let lines = render_git_widget(&data, Rect::new(0, 0, 32, 10));
-        let last: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(last.contains("+19 more") && last.ends_with("+410 −96 all"), "{last:?}");
+        let last: String = lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            last.contains("+19 more") && last.ends_with("+410 −96 all"),
+            "{last:?}"
+        );
     }
 
     #[test]
@@ -496,9 +531,18 @@ mod tests {
             git_info: Some(info.clone()),
             ..Default::default()
         };
-        println!("dirty_total={} +{} -{}", info.dirty_total, info.added_total, info.removed_total);
+        println!(
+            "dirty_total={} +{} -{}",
+            info.dirty_total, info.added_total, info.removed_total
+        );
         for l in render_git_widget(&data, Rect::new(0, 0, 36, 5)) {
-            println!("|{}|", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>());
+            println!(
+                "|{}|",
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            );
         }
         assert!(info.repo_root.is_some());
         let ordered: Vec<_> = info.dirty_files.iter().map(|f| f.modified_at).collect();

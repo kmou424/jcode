@@ -136,10 +136,7 @@ impl App {
             Self::failover_config_hint(),
         );
 
-        match crate::config::Config::load()
-            .provider
-            .cross_provider_failover
-        {
+        match crate::config::config().provider.cross_provider_failover {
             crate::config::CrossProviderFailoverMode::Manual if !self.is_remote => {
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
@@ -1587,7 +1584,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if matches!(trimmed, "/fast default" | "/fast default status") {
-        let default_tier = crate::config::Config::load().provider.openai_service_tier;
+        let default_tier = crate::config::config().provider.openai_service_tier.clone();
         let default_enabled = default_tier.as_deref() == Some("priority");
         let default_label = default_tier
             .as_deref()
@@ -1606,7 +1603,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             "on" => super::auth::save_openai_fast_setting_local(app, true),
             "off" => super::auth::save_openai_fast_setting_local(app, false),
             "status" => {
-                let default_tier = crate::config::Config::load().provider.openai_service_tier;
+                let default_tier = crate::config::config().provider.openai_service_tier.clone();
                 let default_enabled = default_tier.as_deref() == Some("priority");
                 let default_label = default_tier
                     .as_deref()
@@ -1637,7 +1634,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             .as_deref()
             .map(service_tier_display_label)
             .unwrap_or("Standard");
-        let default_tier = crate::config::Config::load().provider.openai_service_tier;
+        let default_tier = crate::config::config().provider.openai_service_tier.clone();
         let default_enabled = default_tier.as_deref() == Some("priority");
         let default_label = default_tier
             .as_deref()
@@ -1664,7 +1661,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     .as_deref()
                     .map(service_tier_display_label)
                     .unwrap_or("Standard");
-                let default_tier = crate::config::Config::load().provider.openai_service_tier;
+                let default_tier = crate::config::config().provider.openai_service_tier.clone();
                 let default_enabled = default_tier.as_deref() == Some("priority");
                 let default_label = default_tier
                     .as_deref()

@@ -124,7 +124,7 @@ fn pending_prompt_transition_invalidates_the_memo() {
 
     assert_eq!(
         pending,
-        vec![("/cancel".to_string(), "Cancel the pending prompt")],
+        vec![("/cancel".to_string(), "Cancel the pending prompt".to_string())],
         "a pending prompt must suppress the palette down to /cancel"
     );
 }

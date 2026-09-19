@@ -795,7 +795,11 @@ impl InfoWidgetData {
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
             WidgetKind::ModelInfo => runtime_has_data(self),
             WidgetKind::Tips => false,
-            WidgetKind::GitStatus => self.git_info.as_ref().map(changes_has_data).unwrap_or(false),
+            WidgetKind::GitStatus => self
+                .git_info
+                .as_ref()
+                .map(changes_has_data)
+                .unwrap_or(false),
         }
     }
 

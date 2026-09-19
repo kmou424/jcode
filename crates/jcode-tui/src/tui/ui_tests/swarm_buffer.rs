@@ -565,7 +565,10 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
         "full 10-cell bar when roomy: {row}"
     );
     assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
-    assert!(!row.contains("(overscroll"), "no countdown on the pinned line: {row}");
+    assert!(
+        !row.contains("(overscroll"),
+        "no countdown on the pinned line: {row}"
+    );
 }
 
 #[test]
@@ -681,9 +684,14 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
         .join("\n");
     assert!(!widgets.is_empty(), "expected widgets:\n{frame}");
 
-    assert!(widgets.contains("turn_execution.rs"), "Changes detail:\n{frame}");
+    assert!(
+        widgets.contains("turn_execution.rs"),
+        "Changes detail:\n{frame}"
+    );
     assert!(widgets.contains("62 tok/s"), "Runtime detail:\n{frame}");
-    for owned in ["GPT-5.6", "74k", "256k", "29%", "OAuth", "OpenAI", "main", "~3", "↑1"] {
+    for owned in [
+        "GPT-5.6", "74k", "256k", "29%", "OAuth", "OpenAI", "main", "~3", "↑1",
+    ] {
         assert!(
             !widgets.contains(owned),
             "{owned:?} is a status-line fact and must not repeat in widgets:\n{frame}"

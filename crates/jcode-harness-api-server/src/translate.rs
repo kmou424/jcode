@@ -1687,7 +1687,10 @@ impl BridgeState {
                 expected_tokens: event["expected_tokens"].as_u64().unwrap_or(0),
                 read_tokens: event["read_tokens"].as_u64().unwrap_or(0),
                 documented_cause: event["documented_cause"].as_str().map(str::to_string),
-                message: event["message"].as_str().unwrap_or("KV cache miss").to_string(),
+                message: event["message"]
+                    .as_str()
+                    .unwrap_or("KV cache miss")
+                    .to_string(),
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);

@@ -126,7 +126,7 @@ fn test_command_palette_suppressed_while_api_key_prompt_pending() {
     let suggestions = app.command_suggestions();
     assert_eq!(
         suggestions,
-        vec![("/cancel".to_string(), "Cancel the pending prompt")],
+        vec![("/cancel".to_string(), "Cancel the pending prompt".to_string())],
         "only /cancel may be suggested while a login prompt is pending"
     );
 
