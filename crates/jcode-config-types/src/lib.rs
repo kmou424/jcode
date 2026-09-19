@@ -1202,6 +1202,11 @@ pub struct FeatureConfig {
     /// that something in the harness silently invalidated the prefix cache
     /// (default: true).
     pub kv_cache_miss_notices: bool,
+    /// On SSH remote attach, probe the remote's login status and offer to import
+    /// a local OpenAI/Claude login when the remote has none (default: true).
+    /// Set false to suppress the startup offer; `/login --import-local` still
+    /// works on demand.
+    pub ssh_login_import_offer: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
 }
@@ -1217,6 +1222,7 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
+            ssh_login_import_offer: true,
             update_channel: UpdateChannel::default(),
         }
     }
