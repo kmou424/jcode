@@ -363,22 +363,50 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
-        // Fast path: already connected via pool handle.
+        // Fast path: already connected via pool handle. A handle whose shared
+        // child died (daemon-side restart, crash) is stale — evict and
+        // reconnect below instead of returning a broken-pipe error forever.
         {
             let handles = self.pool_handles.read().await;
             if let Some(handle) = handles.get(server) {
-                let result = handle.call_tool(tool, arguments).await;
-                meter_provenance_call(server, &result);
-                return result;
+                if handle.is_alive() {
+                    let result = handle.call_tool(tool, arguments).await;
+                    meter_provenance_call(server, &result);
+                    return result;
+                }
             }
         }
         // Fast path: already connected via owned client.
         {
             let clients = self.owned_clients.read().await;
             if let Some(client) = clients.get(server) {
-                let result = client.call_tool(tool, arguments).await;
-                meter_provenance_call(server, &result);
-                return result;
+                if client.is_alive() {
+                    let result = client.call_tool(tool, arguments).await;
+                    meter_provenance_call(server, &result);
+                    return result;
+                }
+            }
+        }
+
+        // Evict stale entries left by a dead server before reconnecting.
+        {
+            let mut handles = self.pool_handles.write().await;
+            if handles.remove(server).is_some() {
+                crate::logging::warn(&format!(
+                    "MCP: shared server '{server}' died, reconnecting"
+                ));
+                if let Some(pool) = &self.pool {
+                    pool.disconnect_server(server).await;
+                }
+            }
+        }
+        {
+            let mut clients = self.owned_clients.write().await;
+            if let Some(mut client) = clients.remove(server) {
+                crate::logging::warn(&format!(
+                    "MCP: owned server '{server}' died, reconnecting"
+                ));
+                client.shutdown().await;
             }
         }
 
