@@ -2940,6 +2940,18 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::SessionList { sessions, .. } => app.apply_remote_session_list(sessions),
+        ServerEvent::SessionPreviewResult {
+            session_id,
+            messages,
+            ..
+        } => app.apply_remote_session_preview(&session_id, messages),
+        ServerEvent::Todos {
+            todos, goals, plan, ..
+        } => {
+            app.apply_remote_todos(todos, goals, plan);
+            true
+        }
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
