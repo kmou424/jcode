@@ -5,6 +5,7 @@
 //! MCP server processes instead of spawning duplicates.
 
 mod client;
+mod http;
 mod manager;
 pub mod pool;
 mod protocol;
