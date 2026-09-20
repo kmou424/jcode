@@ -23,6 +23,7 @@ mod edit_stats;
 mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
+mod git;
 mod gmail;
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 pub mod applet;
@@ -457,6 +458,13 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "git_commit", git::GitCommitTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "git_checkpoint",
+                git::GitCheckpointTool::new,
+            );
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,

@@ -131,6 +131,42 @@ where
     deserializer.deserialize_any(BoolOrString)
 }
 
+/// Deserialize a field that may arrive as explicit `null`: both a missing key
+/// and `null` become `T::default()`.
+///
+/// Provider-side strict tool-schema normalization marks every property
+/// required and expresses optionality as nullable, so models legitimately send
+/// `null` for fields they are not using. serde's `default` covers only the
+/// missing case and rejects the explicit `null`.
+pub fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Deserialize an `Option<String>` where `null`, missing, and blank strings
+/// all become `None`, and the surviving value is trimmed.
+pub fn opt_string_blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+/// Deserialize an `Option<Vec<T>>` where `null`, missing, and an empty array
+/// all become `None`.
+pub fn opt_vec_nonempty<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.filter(|v| !v.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

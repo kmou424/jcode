@@ -83,6 +83,7 @@ impl Config {
 - Disable base tools: {}
 - MCP tools: {}
 - MCP auto threshold: {} tokens
+- Git signoff: {}
 
 **Provider:**
 - Default model: {}
@@ -250,6 +251,15 @@ impl Config {
             self.tools.disable_base_tools,
             self.tools.mcp_tools.as_str(),
             self.tools.mcp_tools_token_threshold,
+            match (
+                self.tools.git.signoff_name.as_deref(),
+                self.tools.git.signoff_email.as_deref(),
+            ) {
+                (Some(name), Some(email)) => format!("{name} <{email}>"),
+                (Some(name), None) => name.to_string(),
+                (None, Some(email)) => format!("<{email}>"),
+                (None, None) => "(none)".to_string(),
+            },
             self.provider
                 .default_model
                 .as_deref()
