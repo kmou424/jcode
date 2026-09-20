@@ -226,6 +226,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 vec![
                     ContentBlock::Reasoning {
                         text: "hidden reasoning should never leak".to_string(),
+                        duration_secs: None,
                     },
                     ContentBlock::Text {
                         text: "Final visible answer.".to_string(),

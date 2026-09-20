@@ -1007,6 +1007,13 @@ pub(super) fn handle_disconnect(
     app.remote_resume_activity = None;
     let ops = app.stream_buffer.flush();
     app.apply_stream_ops(ops);
+    // An open reasoning region must anchor as its own `reasoning` row *before*
+    // the partial assistant text commits below, or the block markup would be
+    // stranded in the committed content (and the row lost entirely under
+    // `off`). No-op when no region is open.
+    if app.reasoning_streaming {
+        app.close_reasoning_region(None);
+    }
     if !app.streaming.streaming_text.is_empty() {
         let content = app.take_streaming_text();
         let content = app.collapse_reasoning_for_commit(content);

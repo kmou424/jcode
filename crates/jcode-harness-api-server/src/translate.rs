@@ -1385,6 +1385,7 @@ impl BridgeState {
                                     .unwrap_or(None),
                                 role: m["role"].as_str().unwrap_or("").to_string(),
                                 content: m["content"].as_str().unwrap_or("").to_string(),
+                                duration_secs: m["duration_secs"].as_f64(),
                             })
                             .collect()
                     })
@@ -2686,6 +2687,7 @@ impl BridgeState {
                     response_stats: None,
                     role: role.to_string(),
                     content,
+                    duration_secs: None,
                 })
             })
             .take(limit)

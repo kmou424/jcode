@@ -133,6 +133,7 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 // History-only reasoning trace, never replayed to a provider.
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
+                    duration_secs: None,
                 },
             ],
             // Backfilled after the tool ran / a newer turn was committed.
@@ -1165,6 +1166,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
                 content: "stale answer".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                duration_secs: None,
             }],
             images: vec![],
             provider_name: Some("stale-provider".to_string()),
@@ -1259,6 +1261,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
                 content: "stale answer".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                duration_secs: None,
             }],
             images: vec![],
             provider_name: Some("stale-provider".to_string()),
@@ -1345,6 +1348,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
                 content: "ancient answer".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                duration_secs: None,
             }],
             images: vec![],
             provider_name: Some("ancient-provider".to_string()),

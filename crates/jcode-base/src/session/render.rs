@@ -2,7 +2,6 @@ mod response_stats;
 
 use super::{Session, StoredDisplayRole};
 use crate::message::{ContentBlock, Role, ToolCall};
-use jcode_config_types::ReasoningDisplayMode;
 pub use jcode_session_types::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage,
@@ -17,43 +16,51 @@ use std::collections::HashMap;
 pub const DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES: usize = 64;
 
 /// Format persisted reasoning/thinking text into the dim+italic markdown used
-/// by the live streaming path. Each line is wrapped via the shared `reasoning_line_markup` so resumed
-/// sessions render reasoning identically to how it streamed, terminated by a
-/// blank line so following answer text renders as a normal paragraph.
+/// by the live streaming path. Each line is wrapped via the shared
+/// `reasoning_line_markup` so resumed sessions render reasoning identically to
+/// how it streamed.
 ///
-/// Honors the active `reasoning_display` mode so re-rendered history (reload,
-/// resume, remote sync, compaction-window expand) matches the live behavior:
-/// - `Off`: persisted reasoning is hidden entirely.
-/// - `Current`: only the *live* reasoning block is ever shown, so historical
-///   reasoning is hidden on re-render (the live block already streamed and was
-///   discarded once the model answered), matching the ephemeral live behavior.
-/// - `Compact`: collapsed traces are likewise session-ephemeral (the persisted
-///   block carries no thinking duration, so a faithful `✻ thought for Ns`
-///   summary cannot be rebuilt), so historical reasoning is hidden on
-///   re-render too.
-/// - `Full`: every reasoning line is shown (classic behavior).
+/// The markup is emitted unconditionally: *which* reasoning blocks are shown is
+/// decided at render time by the active `reasoning_display` mode (the TUI's
+/// `render_reasoning_message`), so the same rendered history can re-render
+/// correctly when the mode is toggled without rebuilding `DisplayMessage`s.
 fn format_reasoning_markup(text: &str) -> String {
     if text.trim().is_empty() {
         return String::new();
-    }
-    let mode = crate::config::config().display.reasoning_display();
-    match mode {
-        // In `Off`, `Current`, and `Compact` modes persisted reasoning is not
-        // re-rendered: `Current`/`Compact` only ever show the live block, which
-        // is discarded once the model answers, so reloaded history shows no
-        // past reasoning.
-        ReasoningDisplayMode::Off
-        | ReasoningDisplayMode::Current
-        | ReasoningDisplayMode::Compact => return String::new(),
-        ReasoningDisplayMode::Full => {}
     }
     let mut out = String::new();
     for line in text.split('\n') {
         out.push_str(&jcode_render_core::reasoning_line_markup(line));
     }
-    // Blank line terminates the reasoning block.
-    out.push('\n');
-    out
+    // Standalone reasoning message: no trailing blank line (the live anchor
+    // path trims block markup the same way).
+    out.trim_end_matches('\n').to_string()
+}
+
+/// Push each accumulated reasoning block as its own `role="reasoning"`
+/// [`RenderedMessage`], preserving block order. Reasoning is first-class
+/// display data: the message carries the sentinel-wrapped text plus the
+/// block's thinking duration so any `reasoning_display` mode can re-render it
+/// (off → hidden, current/full → full text, compact → `✻ thought for Ns`).
+fn flush_reasoning_messages(
+    rendered: &mut Vec<RenderedMessage>,
+    pending_reasoning: &mut Vec<(String, Option<f64>)>,
+    stored_index: usize,
+) {
+    for (markup, duration_secs) in pending_reasoning.drain(..) {
+        if markup.is_empty() {
+            continue;
+        }
+        rendered.push(RenderedMessage {
+            response_stats: None,
+            role: "reasoning".to_string(),
+            content: markup,
+            tool_calls: Vec::new(),
+            tool_data: None,
+            stored_index: Some(stored_index),
+            duration_secs,
+        });
+    }
 }
 
 fn is_internal_system_reminder(msg: &super::StoredMessage) -> bool {
@@ -109,6 +116,11 @@ fn stored_message_renders_visible_message(msg: &super::StoredMessage) -> bool {
     msg.content.iter().any(|block| match block {
         ContentBlock::Text { text, .. } => !text.is_empty(),
         ContentBlock::ToolResult { .. } => true,
+        // Reasoning blocks render as their own `reasoning` rows in every
+        // display mode (the mode only gates visibility at render time).
+        ContentBlock::Reasoning { text, .. } | ContentBlock::ReasoningTrace { text, .. } => {
+            !text.trim().is_empty()
+        }
         _ => false,
     })
 }
@@ -410,6 +422,7 @@ pub fn render_messages_and_images_with_compacted_history(
             tool_calls: Vec::new(),
             tool_data: None,
             stored_index: None,
+            duration_secs: None,
         });
     }
 
@@ -439,17 +452,18 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls: Vec::new(),
                 tool_data: None,
                 stored_index: Some(stored_index),
+                duration_secs: None,
             });
             continue;
         }
         let message_role = msg.role.clone();
         let mut text = String::new();
-        // Reasoning is accumulated separately so it can be rendered *before* the
-        // answer text, matching the live streaming order. Providers persist the
-        // assistant turn as `[Text, ReasoningTrace, ToolUse]`, so appending
-        // reasoning into `text` in block order would otherwise show the thinking
-        // *after* the answer on resume/re-render.
-        let mut reasoning = String::new();
+        // Reasoning blocks are accumulated separately so they render *before*
+        // the answer text, matching the live streaming order. Providers persist
+        // the assistant turn as `[Text, ReasoningTrace, ToolUse]`; each block
+        // becomes its own `role="reasoning"` rendered message (with duration)
+        // so the active display mode can gate visibility at render time.
+        let mut pending_reasoning: Vec<(String, Option<f64>)> = Vec::new();
         let mut tool_calls: Vec<String> = Vec::new();
         let mut current_tool: Option<ToolCall> = None;
         let mut last_image_idx: Option<usize> = None;
@@ -500,20 +514,22 @@ pub fn render_messages_and_images_with_compacted_history(
                     content,
                     ..
                 } => {
-                    let combined = format!("{}{}", reasoning, text);
-                    if !combined.is_empty() {
-                        if role == "user" && !is_attached_image_label_text(&text) {
+                    flush_reasoning_messages(&mut rendered, &mut pending_reasoning, stored_index);
+                    if !text.is_empty() || !tool_calls.is_empty() {
+                        if role == "user"
+                            && !text.is_empty()
+                            && !is_attached_image_label_text(&text)
+                        {
                             user_prompt_count += 1;
                         }
-                        text.clear();
-                        reasoning.clear();
                         rendered.push(RenderedMessage {
                             response_stats: None,
                             role: role.to_string(),
-                            content: combined,
+                            content: std::mem::take(&mut text),
                             tool_calls: tool_calls.clone(),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            duration_secs: None,
                         });
                     }
 
@@ -535,10 +551,21 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data,
                         stored_index: Some(stored_index),
+                        duration_secs: None,
                     });
                 }
-                ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
-                    reasoning.push_str(&format_reasoning_markup(t));
+                ContentBlock::Reasoning {
+                    text: t,
+                    duration_secs,
+                }
+                | ContentBlock::ReasoningTrace {
+                    text: t,
+                    duration_secs,
+                } => {
+                    let markup = format_reasoning_markup(t);
+                    if !markup.is_empty() {
+                        pending_reasoning.push((markup, *duration_secs));
+                    }
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
@@ -567,18 +594,19 @@ pub fn render_messages_and_images_with_compacted_history(
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
+        flush_reasoning_messages(&mut rendered, &mut pending_reasoning, stored_index);
+        if !text.is_empty() || !tool_calls.is_empty() {
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
             rendered.push(RenderedMessage {
                 response_stats: None,
                 role: role.to_string(),
-                content: combined,
+                content: text,
                 tool_calls,
                 tool_data: None,
                 stored_index: Some(stored_index),
+                duration_secs: None,
             });
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;

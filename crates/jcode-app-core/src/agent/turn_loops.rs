@@ -245,6 +245,11 @@ impl Agent {
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
+            // Same accumulation as the mpsc path: ThinkingEnd contributes the
+            // observed elapsed time; a following ThinkingDone replaces it with
+            // the provider-measured duration. Persisted on the trace block.
+            let mut reasoning_duration_secs: Option<f64> = None;
+            let mut reasoning_end_estimate_secs: Option<f64> = None;
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
@@ -317,12 +322,33 @@ impl Agent {
                     }
                     StreamEvent::ThinkingEnd => {
                         // Don't print here - ThinkingDone has accurate timing
-                        _thinking_start = None;
+                        if let Some(elapsed) = _thinking_start
+                            .take()
+                            .map(|start| start.elapsed().as_secs_f64())
+                        {
+                            reasoning_duration_secs =
+                                Some(reasoning_duration_secs.unwrap_or(0.0) + elapsed);
+                            reasoning_end_estimate_secs = Some(elapsed);
+                        }
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Bridge provides accurate wall-clock timing
                         if print_output {
                             println!("Thought for {:.1}s\n", duration_secs);
+                        }
+                        // Provider-measured duration replaces the elapsed
+                        // estimate recorded at ThinkingEnd for the same block.
+                        match reasoning_end_estimate_secs.take() {
+                            Some(estimate) => {
+                                reasoning_duration_secs = Some(
+                                    reasoning_duration_secs.unwrap_or(0.0) - estimate
+                                        + duration_secs,
+                                );
+                            }
+                            None => {
+                                reasoning_duration_secs =
+                                    Some(reasoning_duration_secs.unwrap_or(0.0) + duration_secs);
+                            }
                         }
                     }
                     StreamEvent::TextDelta(text) => {
@@ -534,6 +560,8 @@ impl Agent {
                         generated_image_contexts.clear();
                         reasoning_content.clear();
                         reasoning_signature.clear();
+                        reasoning_duration_secs = None;
+                        reasoning_end_estimate_secs = None;
                         openai_reasoning_items.clear();
                         openai_native_compaction = None;
                         saw_message_end = false;
@@ -798,6 +826,7 @@ impl Agent {
                 &reasoning_content,
                 Some(&reasoning_signature),
                 store_reasoning_content,
+                reasoning_duration_secs,
             );
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());

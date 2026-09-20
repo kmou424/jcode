@@ -120,6 +120,12 @@ pub enum ContentBlock {
     /// Hidden reasoning content used for providers that require it (not displayed)
     Reasoning {
         text: String,
+        /// Wall-clock thinking time (seconds) reported by the provider when the
+        /// reasoning block closed, if known. Lets the UI re-render a faithful
+        /// `✻ thought for Ns` summary after reload/remote sync. `None` on older
+        /// sessions that predate the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_secs: Option<f64>,
     },
     /// History-only reasoning trace. Captured purely so the model's thinking is
     /// preserved in the transcript for later recall/debugging. Unlike
@@ -128,6 +134,9 @@ pub enum ContentBlock {
     /// and cannot trigger provider-side "unsigned thinking" rejections.
     ReasoningTrace {
         text: String,
+        /// Wall-clock thinking time (seconds) for this trace, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_secs: Option<f64>,
     },
     /// Anthropic signed thinking content. Anthropic requires the signature when
     /// replaying thinking blocks in future request context.
@@ -879,6 +888,7 @@ mod tests {
                 },
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
+                    duration_secs: None,
                 },
             ],
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),

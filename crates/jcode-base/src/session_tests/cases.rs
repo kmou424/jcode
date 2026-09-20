@@ -1523,6 +1523,7 @@ fn test_render_messages_renders_reasoning_before_answer_in_stored_order() {
             },
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two".to_string(),
+                duration_secs: None,
             },
         ],
     );
@@ -1562,6 +1563,7 @@ fn test_render_messages_renders_persisted_reasoning() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -1610,6 +1612,7 @@ fn test_render_messages_renders_legacy_reasoning_variant() {
         Role::Assistant,
         vec![ContentBlock::Reasoning {
             text: "legacy thought".to_string(),
+            duration_secs: None,
         }],
     );
 
@@ -1643,6 +1646,7 @@ fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "step one\nstep two\nstep three".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -1690,6 +1694,7 @@ fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
         vec![
             ContentBlock::ReasoningTrace {
                 text: "secret thought".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is the answer.".to_string(),
@@ -2152,6 +2157,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
         content: vec![
             ContentBlock::ReasoningTrace {
                 text: "step 1: consider the run loop ordering".to_string(),
+                duration_secs: None,
             },
             ContentBlock::Text {
                 text: "Here is my answer.".to_string(),
@@ -2183,7 +2189,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let has_trace = assistant.content.iter().any(|b| {
         matches!(
             b,
-            ContentBlock::ReasoningTrace { text }
+            ContentBlock::ReasoningTrace { text, .. }
                 if text == "step 1: consider the run loop ordering"
         )
     });

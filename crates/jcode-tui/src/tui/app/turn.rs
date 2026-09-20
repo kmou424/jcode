@@ -248,6 +248,12 @@ impl App {
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
+            // Accumulated wall-clock thinking time for the attempt, persisted
+            // on the reasoning trace block so reloaded history can re-render
+            // `✻ thought for Ns`. ThinkingEnd contributes the elapsed estimate;
+            // a following ThinkingDone replaces it with the measured value.
+            let mut reasoning_duration_secs: Option<f64> = None;
+            let mut reasoning_end_estimate_secs: Option<f64> = None;
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
@@ -322,6 +328,7 @@ impl App {
                                                 &reasoning_content,
                                                 Some(&reasoning_signature),
                                                 store_reasoning_content,
+                                                reasoning_duration_secs,
                                             );
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
@@ -387,6 +394,7 @@ impl App {
                                                 &reasoning_content,
                                                 Some(&reasoning_signature),
                                                 store_reasoning_content,
+                                                reasoning_duration_secs,
                                             );
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
@@ -434,6 +442,7 @@ impl App {
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
                                         reasoning_content.clear();
+                                        reasoning_duration_secs = None;
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -705,6 +714,8 @@ impl App {
                                         sdk_tool_results.clear();
                                         reasoning_content.clear();
                                         reasoning_signature.clear();
+                                        reasoning_duration_secs = None;
+                                        reasoning_end_estimate_secs = None;
                                         openai_reasoning_items.clear();
                                         openai_native_compaction = None;
                                         saw_message_end = false;
@@ -789,10 +800,15 @@ impl App {
                                         // paced through the same segment-aware StreamBuffer as the
                                         // answer text, so ordering is preserved without flushing
                                         // and bursts trickle in smoothly.
-                                        if config().display.reasoning_enabled() {
-                                            let ops = self.stream_buffer.push_reasoning(&thinking_text);
-                                            self.apply_stream_ops(ops);
-                                        }
+                                        // Reasoning deltas are captured as display
+                                        // data in every mode: `off` accumulates them
+                                        // into a hidden block that still anchors as a
+                                        // reasoning message, so a later mode toggle
+                                        // can reveal them. Render-time mode gating
+                                        // (see `render_reasoning_message`) decides
+                                        // what is actually visible.
+                                        let ops = self.stream_buffer.push_reasoning(&thinking_text);
+                                        self.apply_stream_ops(ops);
                                         // Always capture reasoning text so it can be
                                         // persisted as a history-only trace, regardless
                                         // of provider replay support.
@@ -812,19 +828,42 @@ impl App {
                                         // `✻ thought for Ns` when the region
                                         // close lands (queued behind the final
                                         // buffered reasoning characters).
-                                        self.reasoning_close_duration_secs = self
+                                        let elapsed = self
                                             .thinking_start
                                             .take()
                                             .map(|start| start.elapsed().as_secs_f64());
+                                        self.reasoning_close_duration_secs = elapsed;
+                                        if let Some(elapsed) = elapsed {
+                                            reasoning_duration_secs = Some(
+                                                reasoning_duration_secs.unwrap_or(0.0) + elapsed,
+                                            );
+                                            reasoning_end_estimate_secs = Some(elapsed);
+                                        }
                                         self.thinking_buffer.clear();
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);
                                     }
                                     StreamEvent::ThinkingDone { duration_secs } => {
                                         // Provider-measured duration wins over
                                         // the elapsed estimate captured at
-                                        // ThinkingEnd.
+                                        // ThinkingEnd, both for the live
+                                        // region close and the persisted trace.
                                         self.reasoning_close_duration_secs = Some(duration_secs);
-                                        if config().display.reasoning_enabled() {
+                                        match reasoning_end_estimate_secs.take() {
+                                            Some(estimate) => {
+                                                reasoning_duration_secs = Some(
+                                                    reasoning_duration_secs.unwrap_or(0.0)
+                                                        - estimate
+                                                        + duration_secs,
+                                                );
+                                            }
+                                            None => {
+                                                reasoning_duration_secs = Some(
+                                                    reasoning_duration_secs.unwrap_or(0.0)
+                                                        + duration_secs,
+                                                );
+                                            }
+                                        }
+                                        {
                                             // Queue the region close behind any still-buffered
                                             // reasoning so it lands exactly after the final
                                             // reasoning character reveals. The provider-measured
@@ -1086,6 +1125,7 @@ impl App {
                 &reasoning_content,
                 Some(&reasoning_signature),
                 store_reasoning_content,
+                reasoning_duration_secs,
             );
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
@@ -1317,6 +1357,9 @@ impl App {
                                             // Just preserve the visual streaming content.
                                             let ops = self.stream_buffer.flush();
                                             self.apply_stream_ops(ops);
+                                            if self.reasoning_streaming {
+                                                self.close_reasoning_region(None);
+                                            }
                                             if !self.streaming.streaming_text.is_empty() {
                                                 let content = self.take_streaming_text();
                                                 let content = self.collapse_reasoning_for_commit(content);

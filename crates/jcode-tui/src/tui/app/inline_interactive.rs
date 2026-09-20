@@ -2819,6 +2819,7 @@ impl App {
                     tool_calls: message.tool_calls,
                     tool_data: None,
                     timestamp: message.timestamp,
+                    duration_secs: message.duration_secs,
                 })
                 .collect(),
         );

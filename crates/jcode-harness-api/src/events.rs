@@ -398,9 +398,12 @@ pub struct HistoryMessage {
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<ResponseStats>,
-    /// "user" | "assistant" | "tool".
+    /// "user" | "assistant" | "tool" | "reasoning".
     pub role: String,
     pub content: String,
+    /// Wall-clock thinking time (seconds) on `role="reasoning"` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

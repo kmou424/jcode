@@ -83,6 +83,11 @@ pub struct RenderedMessage {
     /// transcript (issue #432).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_index: Option<usize>,
+    /// Wall-clock thinking time (seconds). Present on `role="reasoning"`
+    /// messages so `compact` reasoning display can render `✻ thought for Ns`
+    /// for reloaded/remotely-synced history, not just live traces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

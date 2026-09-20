@@ -1179,6 +1179,11 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
 fn test_prepare_messages_renders_reasoning_role_dim_italic_without_sentinel() {
     let _guard = crate::storage::lock_test_env();
     clear_test_render_state_for_tests();
+    // Reasoning rows are render-gated by the *current* display mode: pin `full`
+    // so the row renders its stored markup verbatim (the historical-rows path).
+    crate::tui::ui::tests_reasoning_display_override::set(Some(
+        crate::config::ReasoningDisplayMode::Full,
+    ));
 
     // A collapsing reasoning message carries sentinel-wrapped dim/italic markup.
     let mut content = String::new();
@@ -1234,12 +1239,16 @@ fn test_prepare_messages_renders_reasoning_role_dim_italic_without_sentinel() {
         }),
         "summary line should render"
     );
+    crate::tui::ui::tests_reasoning_display_override::set(None);
 }
 
 #[test]
 fn test_prepare_messages_renders_anchored_reasoning_message_in_flow() {
     let _guard = crate::storage::lock_test_env();
     clear_test_render_state_for_tests();
+    crate::tui::ui::tests_reasoning_display_override::set(Some(
+        crate::config::ReasoningDisplayMode::Full,
+    ));
 
     // Anchored reasoning traces are ordinary display messages in the body:
     // they render dim+italic (sentinel stripped) between surrounding entries.
@@ -1282,6 +1291,7 @@ fn test_prepare_messages_renders_anchored_reasoning_message_in_flow() {
         "sentinel must be stripped: {:?}",
         joined[reasoning_idx]
     );
+    crate::tui::ui::tests_reasoning_display_override::set(None);
 }
 
 /// Regression: re-rendering the transcript under a changed display toggle must

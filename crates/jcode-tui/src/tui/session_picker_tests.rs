@@ -43,6 +43,7 @@ fn make_session_with_flags(
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         },
         PreviewMessage {
             role: "assistant".to_string(),
@@ -50,6 +51,7 @@ fn make_session_with_flags(
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         },
     ];
     let search_index = build_search_index(
@@ -693,6 +695,7 @@ fn benchmark_resume_search_reports_incremental_timings() {
                 tool_calls: Vec::new(),
                 tool_data: None,
                 timestamp: None,
+                duration_secs: None,
             }];
             session.search_index = build_search_index(
                 &session.id,
@@ -1462,6 +1465,7 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         });
         preview.push(PreviewMessage {
             role: "assistant".to_string(),
@@ -1469,6 +1473,7 @@ fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         });
     }
     session.first_user_prompt = preview.first().map(|m| m.content.clone());
@@ -1513,6 +1518,7 @@ fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) -> Vec<Prev
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         });
 
         let mut body = String::new();
@@ -1534,6 +1540,7 @@ fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) -> Vec<Prev
             tool_calls: Vec::new(),
             tool_data: None,
             timestamp: None,
+            duration_secs: None,
         });
     }
     preview
@@ -1892,7 +1899,8 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 intent: Some("Check structured preview alignment".to_string()),
                 thought_signature: None,
             }),
-        });
+        duration_secs: None,
+});
     }
     for width in [100, 200, 320] {
         markdown::with_center_code_blocks(true, || {

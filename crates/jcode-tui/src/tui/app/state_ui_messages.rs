@@ -59,8 +59,8 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
     for block in &message.content {
         match block {
             ContentBlock::Text { text, .. }
-            | ContentBlock::Reasoning { text }
-            | ContentBlock::ReasoningTrace { text } => {
+            | ContentBlock::Reasoning { text, .. }
+            | ContentBlock::ReasoningTrace { text, .. } => {
                 if !text.trim().is_empty() {
                     parts.push(text.trim().to_string());
                 }
@@ -107,9 +107,12 @@ impl App {
         let is_tool = message.role == "tool";
         // Track the trailing run of assistant messages so a provider
         // RetryRollback can remove exactly the current attempt's committed
-        // output. Any non-assistant message (user/tool/system) is a fence: it
-        // proves earlier assistant messages belong to completed work.
-        if message.role == "assistant" {
+        // output. Reasoning rows are part of the same run: they anchor
+        // mid-attempt as reasoning regions close, so they must neither reset
+        // the counter nor survive the rollback of the attempt that produced
+        // them. Any other role (user/tool/system) is a fence: it proves
+        // earlier assistant messages belong to completed work.
+        if message.role == "assistant" || message.role == "reasoning" {
             self.attempt_committed_assistant_messages += 1;
         } else {
             self.attempt_committed_assistant_messages = 0;
@@ -131,6 +134,9 @@ impl App {
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
         self.attempt_committed_assistant_messages = 0;
+        // Rebuilt transcripts carry only historical reasoning rows; any
+        // recorded live-turn trace index would now point at the wrong row.
+        self.turn_reasoning_traces.clear();
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
         self.note_runtime_memory_event_force("display_messages_replaced", "display_history_reset");
@@ -398,6 +404,18 @@ impl App {
     pub(super) fn remove_display_message(&mut self, idx: usize) -> Option<DisplayMessage> {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);
+            // Keep live-reasoning trace indices aligned with the rows they
+            // point at: drop the removed row's record and shift every later
+            // index down one.
+            self.turn_reasoning_traces.retain_mut(|t| {
+                if t.display_index == idx {
+                    return false;
+                }
+                if t.display_index > idx {
+                    t.display_index -= 1;
+                }
+                true
+            });
             self.bump_display_messages_version();
             Some(removed)
         } else {

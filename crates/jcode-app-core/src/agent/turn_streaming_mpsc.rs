@@ -361,6 +361,14 @@ impl Agent {
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
+            // Wall-clock thinking time accumulated across this attempt's
+            // reasoning blocks. ThinkingEnd contributes the client-observed
+            // elapsed time; a following ThinkingDone replaces that estimate
+            // with the provider-measured value. Persisted on the reasoning
+            // trace block so reloads can re-render `✻ thought for Ns`.
+            let mut reasoning_duration_secs: Option<f64> = None;
+            let mut thinking_start: Option<Instant> = None;
+            let mut reasoning_end_estimate_secs: Option<f64> = None;
             // Whether a live reasoning region is currently streaming to the client.
             // Raw reasoning deltas are sent as `ReasoningDelta`; the client owns the
             // dim/italic styling and live partial-line rendering. We close the region
@@ -479,6 +487,7 @@ impl Agent {
 
                 match event {
                     StreamEvent::ThinkingStart => {
+                        thinking_start = Some(Instant::now());
                         // Reasoning tokens are counted in provider output usage even when
                         // `display.show_thinking` hides the text. Let remote clients start
                         // their TPS timer without forcing hidden reasoning into the transcript.
@@ -486,7 +495,16 @@ impl Agent {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
                         });
                     }
-                    StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingEnd => {
+                        if let Some(elapsed) = thinking_start
+                            .take()
+                            .map(|start| start.elapsed().as_secs_f64())
+                        {
+                            reasoning_duration_secs =
+                                Some(reasoning_duration_secs.unwrap_or(0.0) + elapsed);
+                            reasoning_end_estimate_secs = Some(elapsed);
+                        }
+                    }
                     StreamEvent::ThinkingSignatureDelta(signature) => {
                         if store_reasoning_content {
                             reasoning_signature.push_str(&signature);
@@ -518,6 +536,20 @@ impl Agent {
                         reasoning_content.push_str(&thinking_text);
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
+                        // Provider-measured duration replaces the elapsed
+                        // estimate recorded at ThinkingEnd for the same block.
+                        match reasoning_end_estimate_secs.take() {
+                            Some(estimate) => {
+                                reasoning_duration_secs = Some(
+                                    reasoning_duration_secs.unwrap_or(0.0) - estimate
+                                        + duration_secs,
+                                );
+                            }
+                            None => {
+                                reasoning_duration_secs =
+                                    Some(reasoning_duration_secs.unwrap_or(0.0) + duration_secs);
+                            }
+                        }
                         if reasoning_open {
                             reasoning_open = false;
                             let _ = event_tx.send(ServerEvent::ReasoningDone {
@@ -767,6 +799,9 @@ impl Agent {
                         generated_image_contexts.clear();
                         reasoning_content.clear();
                         reasoning_signature.clear();
+                        reasoning_duration_secs = None;
+                        thinking_start = None;
+                        reasoning_end_estimate_secs = None;
                         reasoning_open = false;
                         openai_reasoning_items.clear();
                         openai_native_compaction = None;
@@ -1094,6 +1129,7 @@ impl Agent {
                 &reasoning_content,
                 Some(&reasoning_signature),
                 store_reasoning_content,
+                reasoning_duration_secs,
             );
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());

@@ -1176,8 +1176,8 @@ request in this new forked session, using the inherited conversation only as con
             for block in &mut msg.content {
                 match block {
                     ContentBlock::Text { text, .. }
-                    | ContentBlock::Reasoning { text }
-                    | ContentBlock::ReasoningTrace { text } => {
+                    | ContentBlock::Reasoning { text, .. }
+                    | ContentBlock::ReasoningTrace { text, .. } => {
                         *text = crate::message::redact_secrets(text);
                     }
                     ContentBlock::AnthropicThinking { thinking, .. } => {

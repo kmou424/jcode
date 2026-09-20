@@ -15,6 +15,60 @@ const MAX_INLINE_DIFF_LINES: usize = 12;
 const MAX_DISCOVERY_DETAIL_LINES: usize = 2;
 const MAX_DISCOVERY_SETUP_LINES: usize = 3;
 
+/// The reasoning-display mode that governs rendering right now. This is the
+/// single read site for the mode at render time: every reasoning gate (row
+/// skip in `ui_prepare`, the compact label here, the session-picker filter)
+/// consults it, so a mode toggle re-renders all captured rows consistently.
+/// Tests can pin a mode via `tests_reasoning_display_override` without
+/// touching the process-global config.
+pub(crate) fn reasoning_display_mode() -> crate::config::ReasoningDisplayMode {
+    #[cfg(test)]
+    if let Some(mode) = tests_reasoning_display_override::get() {
+        return mode;
+    }
+    crate::config::config().display.reasoning_display()
+}
+
+#[cfg(test)]
+pub(crate) mod tests_reasoning_display_override {
+    use crate::config::ReasoningDisplayMode;
+    use std::cell::Cell;
+
+    // Encode the mode as a small int so the override can live in a thread-local
+    // Cell (test threads only ever touch their own copy).
+    thread_local! {
+        static OVERRIDE: Cell<u8> = const { Cell::new(u8::MAX) };
+    }
+
+    fn encode(mode: crate::config::ReasoningDisplayMode) -> u8 {
+        match mode {
+            crate::config::ReasoningDisplayMode::Off => 0,
+            crate::config::ReasoningDisplayMode::Current => 1,
+            crate::config::ReasoningDisplayMode::Compact => 2,
+            crate::config::ReasoningDisplayMode::Full => 3,
+        }
+    }
+
+    fn decode(value: u8) -> Option<ReasoningDisplayMode> {
+        match value {
+            0 => Some(ReasoningDisplayMode::Off),
+            1 => Some(ReasoningDisplayMode::Current),
+            2 => Some(ReasoningDisplayMode::Compact),
+            3 => Some(ReasoningDisplayMode::Full),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get() -> Option<ReasoningDisplayMode> {
+        OVERRIDE.with(|cell| decode(cell.get()))
+    }
+
+    /// Pin a mode (or pass `None` to clear the override).
+    pub(crate) fn set(mode: Option<ReasoningDisplayMode>) {
+        OVERRIDE.with(|cell| cell.set(mode.map(encode).unwrap_or(u8::MAX)));
+    }
+}
+
 fn prefer_width_stable_system_glyphs() -> bool {
     std::env::var("TERM_PROGRAM")
         .ok()
@@ -86,10 +140,27 @@ pub(crate) fn render_assistant_message(
 ) -> Vec<Line<'static>> {
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
-    let mut lines = if let Some(segments) = split_plan_segments(&msg.content) {
+    // Reasoning blocks normally live in their own `reasoning` rows, but
+    // sentinel-marked runs can still appear inside assistant content
+    // (sessions captured before reasoning rows existed, remote snapshots,
+    // mid-block mode toggles). Only `full` mode renders them inline; every
+    // other mode strips them so the reasoning can't double-show or leak
+    // where the mode says hidden.
+    let stripped;
+    let content = if matches!(
+        reasoning_display_mode(),
+        crate::config::ReasoningDisplayMode::Full
+    ) || !msg.content.contains(jcode_tui_markdown::REASONING_SENTINEL)
+    {
+        msg.content.as_str()
+    } else {
+        stripped = crate::tui::app::input::strip_reasoning_lines(&msg.content);
+        stripped.as_str()
+    };
+    let mut lines = if let Some(segments) = split_plan_segments(content) {
         render_assistant_segments(&segments, width, wrap_width)
     } else {
-        markdown::render_markdown_with_width(&msg.content, Some(wrap_width))
+        markdown::render_markdown_with_width(content, Some(wrap_width))
     };
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
@@ -297,9 +368,23 @@ fn plan_card_body_without_title(body: &str, title: &str) -> String {
         .join("\n")
 }
 
-/// Render a collapsed/collapsing reasoning trace ("current" mode). The content is
-/// sentinel-wrapped dim+italic markup (reasoning lines and/or a `▸ thought for Xs`
-/// summary), so it reuses the standard markdown path that styles those runs dim.
+/// One-line collapsed label for a `compact` reasoning row: `✻ thought for
+/// N.Ns` (lowercase, one decimal place, rounded up so a real duration never
+/// displays as `0.0s`). Missing/invalid durations render as bare `✻ thought`
+/// rather than a fake `0.0s`.
+fn compact_reasoning_summary_label(duration_secs: Option<f64>) -> String {
+    match duration_secs.filter(|s| s.is_finite() && *s > 0.0) {
+        Some(secs) => format!("✻ thought for {:.1}s", (secs * 10.0).ceil() / 10.0),
+        None => "✻ thought".to_string(),
+    }
+}
+
+/// Render a reasoning row: sentinel-wrapped dim+italic markup produced by the
+/// live region close or by the session renderer. The row's data is
+/// mode-agnostic — the *current* `reasoning_display` mode decides what shows:
+/// `compact` collapses to the `✻ thought for Ns` label while `full`/`current`
+/// render the block verbatim (`off` and stale `current` rows are filtered
+/// upstream in `ui_prepare.rs`, before the separator blank is emitted).
 pub(crate) fn render_reasoning_message(
     msg: &DisplayMessage,
     width: u16,
@@ -307,7 +392,18 @@ pub(crate) fn render_reasoning_message(
 ) -> Vec<Line<'static>> {
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
-    let mut lines = markdown::render_markdown_with_width(&msg.content, Some(wrap_width));
+    let content = match reasoning_display_mode() {
+        crate::config::ReasoningDisplayMode::Compact => {
+            let label = compact_reasoning_summary_label(msg.duration_secs.map(|secs| secs as f64));
+            // Wrap the label in the same sentinel markup reasoning lines use so
+            // it renders in the block's dim+italic style.
+            jcode_tui_markdown::reasoning_line_markup(&label)
+                .trim_end()
+                .to_string()
+        }
+        _ => msg.content.clone(),
+    };
+    let mut lines = markdown::render_markdown_with_width(&content, Some(wrap_width));
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }

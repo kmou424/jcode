@@ -73,7 +73,7 @@ mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod inline_interactive;
-mod input;
+pub(crate) mod input;
 mod input_help;
 mod local;
 mod misc_ui;
@@ -1037,10 +1037,15 @@ pub struct App {
     // and re-appended on each delta so the in-progress line updates in place.
     reasoning_partial_len: usize,
     // Byte offset in `streaming_text` where the current reasoning block began
-    // (recorded by `open_reasoning_region`). Used in `current` mode to slice the
-    // closed reasoning block back out of the stream in place, keeping any answer
-    // text that preceded it in order.
+    // (recorded by `open_reasoning_region`). The close path slices the block
+    // back out of the stream in place, keeping any answer text that preceded
+    // it in order.
     reasoning_block_start: Option<usize>,
+    // Raw reasoning text accumulated while `reasoning_display` is `off` (the
+    // "hidden" block): deltas bypass `streaming_text` entirely so nothing
+    // renders, but the block still anchors as a `reasoning` message at close
+    // so a later mode toggle can reveal it.
+    reasoning_hidden_block: String,
     // Wall-clock duration (seconds) of the reasoning block that most recently
     // finished. Captured at `ThinkingEnd`/`ThinkingDone` on the local turn path
     // and at `ReasoningDone` on the remote path, then consumed by `compact`

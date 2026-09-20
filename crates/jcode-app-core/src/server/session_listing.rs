@@ -265,6 +265,7 @@ fn build_remote_preview(session: &Session) -> Vec<SessionPreviewMessage> {
             content: message.content,
             tool_calls: message.tool_calls,
             timestamp: None,
+            duration_secs: message.duration_secs,
         })
         .collect()
 }
