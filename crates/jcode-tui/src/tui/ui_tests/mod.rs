@@ -134,6 +134,7 @@ struct TestState {
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
     inline_interactive_state: Option<crate::tui::InlineInteractiveState>,
+    inline_ask_user_question_state: Option<crate::tui::InlineAskUserQuestionState>,
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,
     chat_native_scrollbar: bool,
@@ -439,6 +440,9 @@ impl crate::tui::TuiState for TestState {
     fn inline_interactive_state(&self) -> Option<&crate::tui::InlineInteractiveState> {
         self.inline_interactive_state.as_ref()
     }
+    fn inline_ask_user_question_state(&self) -> Option<&crate::tui::InlineAskUserQuestionState> {
+        self.inline_ask_user_question_state.as_ref()
+    }
     fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
         self.inline_view_state.as_ref()
     }
@@ -510,6 +514,8 @@ fn reset_prompt_viewport_state_for_test() {
     });
 }
 
+#[path = "ask_user_question.rs"]
+mod ask_user_question;
 #[path = "basic.rs"]
 mod basic;
 #[path = "diagrams.rs"]

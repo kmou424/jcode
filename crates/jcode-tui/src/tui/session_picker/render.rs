@@ -251,6 +251,9 @@ impl SessionPicker {
                     ("📦", rgb(255, 193, 7), format!("compacted {}", time_ago))
                 }
                 SessionStatus::RateLimited => ("⏳", accent, format!("rate-limited {}", time_ago)),
+                SessionStatus::AwaitingUser => {
+                    ("❓", accent, format!("awaiting answer {}", time_ago))
+                }
                 SessionStatus::Error { .. } => {
                     ("❌", rgb(220, 100, 100), format!("errored {}", time_ago))
                 }

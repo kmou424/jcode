@@ -189,6 +189,7 @@ async fn test_selfdev_session_and_registry() {
         tool_call_id: "test".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: tool::ToolExecutionMode::Direct,
     };

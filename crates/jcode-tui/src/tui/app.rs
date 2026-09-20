@@ -72,6 +72,7 @@ pub(crate) mod helpers;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
+mod inline_ask_user_question;
 mod inline_interactive;
 pub(crate) mod input;
 mod input_help;
@@ -1455,6 +1456,12 @@ pub struct App {
     inline_view_state: Option<super::InlineViewState>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
+    // Blocking ask_user_question questionnaire shown above input.
+    inline_ask_user_question_state: Option<super::InlineAskUserQuestionState>,
+    // Questionnaire outcome staged by key handling for the remote drain to
+    // send as AskUserQuestionResponse (request_id + result).
+    pending_ask_user_question_response:
+        Option<(String, jcode_session_types::AskUserQuestionResult)>,
     // Cached model picker entries. Building these can require hydrating large provider catalogs.
     model_picker_cache: Option<ModelPickerCache>,
     model_picker_catalog_revision: u64,

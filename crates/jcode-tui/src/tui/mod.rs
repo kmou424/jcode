@@ -813,10 +813,20 @@ pub trait TuiState {
     fn inline_view_state(&self) -> Option<&InlineViewState> {
         None
     }
+    /// Blocking ask_user_question questionnaire shown above input.
+    /// Takes precedence over picker and view states: an unanswered question
+    /// is what the session is waiting on.
+    fn inline_ask_user_question_state(&self) -> Option<&InlineAskUserQuestionState> {
+        None
+    }
     /// General inline UI state shown above input.
     fn inline_ui_state(&self) -> Option<InlineUiStateRef<'_>> {
-        self.inline_interactive_state()
-            .map(InlineUiStateRef::Interactive)
+        self.inline_ask_user_question_state()
+            .map(InlineUiStateRef::AskUserQuestion)
+            .or_else(|| {
+                self.inline_interactive_state()
+                    .map(InlineUiStateRef::Interactive)
+            })
             .or_else(|| self.inline_view_state().map(InlineUiStateRef::View))
     }
     /// Changelog overlay scroll offset (None = not showing)
@@ -1310,10 +1320,143 @@ impl InlineViewState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct InlineAskUserQuestionState {
+    /// Wire request id echoed back in `AskUserQuestionResponse`.
+    pub request_id: String,
+    /// Normalized questions (headers filled, recommended option first).
+    pub questions: Vec<jcode_session_types::AskUserQuestion>,
+    /// Active tab: a question index, or `questions.len()` for the submit
+    /// tab (multi-question questionnaires only).
+    pub question_index: usize,
+    /// Cursor row inside the current question; `options.len()` is the
+    /// client-appended free-text row. Multi-select commits through Enter
+    /// directly, so it has no extra trailing row.
+    pub row_index: usize,
+    /// Toggled option indices per question (multi-select questions only).
+    pub multi_selected: Vec<std::collections::BTreeSet<usize>>,
+    /// Committed answers indexed by question; `None` until answered.
+    pub answers: Vec<Option<jcode_session_types::AskUserQuestionAnswer>>,
+    /// Free-text buffer for the custom row of the current question.
+    pub custom_text: String,
+    /// Edit cursor into `custom_text`, as a char offset.
+    pub custom_cursor: usize,
+    /// Whether the custom row is in text-edit mode.
+    pub editing_custom: bool,
+    /// Notes editor open for the current question (opened with `n`).
+    pub editing_notes: bool,
+    /// Live notes draft and its char cursor while the notes editor is open.
+    pub notes_text: String,
+    /// Edit cursor into `notes_text`, as a char offset.
+    pub notes_cursor: usize,
+    /// Pre-answer notes side-band, indexed by question. Kept separate from
+    /// `answers` so adding a note does not mark the question answered; the
+    /// note merges into the answer at confirm time.
+    pub notes_by_question: Vec<Option<String>>,
+    /// Focused row on the submit tab: 0 = Submit, 1 = Cancel.
+    pub submit_choice: usize,
+    /// First visible body line when the option list overflows the panel.
+    /// Adjusted during rendering so the focused row stays in view; kept in
+    /// a cell because the draw pass only holds `&self`.
+    pub scroll: std::cell::Cell<usize>,
+}
+
+impl InlineAskUserQuestionState {
+    pub fn new(request_id: String, questions: Vec<jcode_session_types::AskUserQuestion>) -> Self {
+        let multi_selected = questions
+            .iter()
+            .map(|_| std::collections::BTreeSet::new())
+            .collect();
+        let answers = questions.iter().map(|_| None).collect();
+        let notes_by_question = questions.iter().map(|_| None).collect();
+        Self {
+            request_id,
+            questions,
+            question_index: 0,
+            row_index: 0,
+            multi_selected,
+            answers,
+            custom_text: String::new(),
+            custom_cursor: 0,
+            editing_custom: false,
+            editing_notes: false,
+            notes_text: String::new(),
+            notes_cursor: 0,
+            notes_by_question,
+            submit_choice: 0,
+            scroll: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Whether the questionnaire has more than one question (and therefore
+    /// question tabs plus a submit tab).
+    pub fn is_multi(&self) -> bool {
+        self.questions.len() > 1
+    }
+
+    /// Whether the active tab is the submit tab.
+    pub fn on_submit_tab(&self) -> bool {
+        self.is_multi() && self.question_index == self.questions.len()
+    }
+
+    /// The question on the active tab (`None` on the submit tab).
+    pub fn current_question(&self) -> Option<&jcode_session_types::AskUserQuestion> {
+        self.questions.get(self.question_index)
+    }
+
+    /// Number of selectable rows in the current question: authored options
+    /// plus the client-appended free-text row.
+    pub fn row_count(&self) -> usize {
+        self.current_question()
+            .map(|question| question.options.len() + 1)
+            .unwrap_or(0)
+    }
+
+    /// Row intent within the current question's option list.
+    pub fn row_kind(&self, index: usize) -> AskUserQuestionRow {
+        let Some(question) = self.current_question() else {
+            return AskUserQuestionRow::Option;
+        };
+        if index < question.options.len() {
+            AskUserQuestionRow::Option
+        } else {
+            AskUserQuestionRow::Custom
+        }
+    }
+
+    /// Note text to seed the notes editor with for a question tab: the
+    /// side-band draft wins, falling back to the committed answer's note.
+    pub fn note_for(&self, tab: usize) -> Option<&str> {
+        if let Some(note) = self.notes_by_question.get(tab).and_then(|n| n.as_deref()) {
+            return Some(note);
+        }
+        self.answers
+            .get(tab)
+            .and_then(|a| a.as_ref())
+            .and_then(|a| a.notes())
+    }
+}
+
+/// Row intent within a question's option list (see `row_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskUserQuestionRow {
+    Option,
+    Custom,
+}
+
+/// What a handled key did to the questionnaire.
+pub enum AskUserQuestionOutcome {
+    /// The panel stays open.
+    Stay,
+    /// The questionnaire finished; the result goes on the wire.
+    Finish(jcode_session_types::AskUserQuestionResult),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InlineUiStateRef<'a> {
     View(&'a InlineViewState),
     Interactive(&'a InlineInteractiveState),
+    AskUserQuestion(&'a InlineAskUserQuestionState),
 }
 
 impl PickerKind {

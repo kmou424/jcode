@@ -1960,6 +1960,10 @@ impl crate::tui::TuiState for App {
         self.inline_interactive_state.as_ref()
     }
 
+    fn inline_ask_user_question_state(&self) -> Option<&crate::tui::InlineAskUserQuestionState> {
+        self.inline_ask_user_question_state.as_ref()
+    }
+
     fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
         self.inline_view_state.as_ref()
     }

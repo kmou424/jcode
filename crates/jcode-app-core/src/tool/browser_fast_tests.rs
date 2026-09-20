@@ -124,6 +124,7 @@ fn ctx() -> ToolContext {
         tool_call_id: "t".into(),
         working_dir: None,
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::super::ToolExecutionMode::Direct,
     }

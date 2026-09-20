@@ -184,6 +184,11 @@ pub struct Session {
     /// Optional user-provided label for saved sessions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_label: Option<String>,
+    /// An `ask_user_question` tool call still blocked on the user's answer.
+    /// Persisted so a resume or re-attach can re-present the questionnaire and
+    /// a late answer can be injected as the recorded tool call's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_ask_user_question: Option<jcode_session_types::PendingAskUserQuestion>,
     /// Environment snapshots for post-mortem debugging
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_snapshots: Vec<EnvSnapshot>,
@@ -527,6 +532,7 @@ impl Session {
             is_debug: self.is_debug,
             saved: self.saved,
             save_label: self.save_label.clone(),
+            pending_ask_user_question: self.pending_ask_user_question.clone(),
         }
     }
 
@@ -729,6 +735,7 @@ impl Session {
         self.is_debug = meta.is_debug;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
+        self.pending_ask_user_question = meta.pending_ask_user_question;
         self.mark_memory_profile_dirty();
     }
 
@@ -770,6 +777,7 @@ impl Session {
             is_debug,
             saved: false,
             save_label: None,
+            pending_ask_user_question: None,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
@@ -825,6 +833,7 @@ impl Session {
             is_debug,
             saved: false,
             save_label: None,
+            pending_ask_user_question: None,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
             replay_events: Vec::new(),

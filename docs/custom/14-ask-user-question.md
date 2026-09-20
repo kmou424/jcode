@@ -73,6 +73,11 @@ answer lands as the tool result the model sees on resume.
   Enter is Done everywhere and commits the toggled set (a no-op while
   nothing is toggled); on the free-text row a typed draft commits as a
   Custom answer while an empty draft commits the toggled set.
+- The free-text row is its own editor: selecting it with Up/Down (or
+  landing on it after a tab switch) engages edit mode directly — no
+  Enter-to-edit gate, matching the wow-pi inline editor. Leaving the row
+  drops back to select mode while the draft survives; Esc still exits to
+  select mode, then cancels.
 - `ui_inline.rs::draw_ask_user_question` — full-width rounded panel with
   horizontal padding, tab bar / header chip, wrapped markdown question
   body, wrapped option list, markdown preview box (height-capped with a
@@ -92,7 +97,8 @@ answer lands as the tool result the model sees on resume.
   `pending_question_response` for local ones; `drain_pending_ask_user_question_responses`
   flushes the staged list after key handling and on the local input path.
 - Divergences from wow-pi: no collapse key, no external editor, no
-  PgUp/PgDn preview paging; single-line editors only.
+  PgUp/PgDn preview paging; single-line editors only. (The free-text row
+  auto-edits on selection, same as wow-pi.)
 
 ## Affected files
 

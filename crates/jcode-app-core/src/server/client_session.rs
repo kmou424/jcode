@@ -867,6 +867,13 @@ pub(super) async fn handle_subscribe(
         session_id: client_session_id.to_string(),
         working_dir: anchor_dir,
     });
+    // Re-present a still-unanswered ask_user_question to the attaching client
+    // the pending registry outlives individual connections.
+    if let Some(event) =
+        super::ask_user_question::pending_ask_user_question_event(client_session_id)
+    {
+        let _ = client_event_tx.send(event);
+    }
     let _ = client_event_tx.send(ServerEvent::Done { id });
     prewarm_idle_agent(agent);
 }
@@ -1397,6 +1404,12 @@ pub(super) async fn handle_resume_session(
             )
             .await;
         spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(live_target_agent));
+        // Re-present a still-unanswered ask_user_question to the attaching
+        // client; the blocked live turn resolves through the registry.
+        if let Some(event) = super::ask_user_question::pending_ask_user_question_event(&session_id)
+        {
+            let _ = client_event_tx.send(event);
+        }
         crate::logging::event_info(
             "SESSION_LIFECYCLE",
             vec![
@@ -1679,6 +1692,22 @@ pub(super) async fn handle_resume_session(
                 )
                 .await;
             spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
+            // A session restored with a persisted ask_user_question gets an
+            // orphaned registry entry: its asking turn is gone, so the
+            // client's answer is injected into history as the recorded tool
+            // call's result. A live in-memory entry always wins over the file.
+            let persisted_pending = {
+                let agent_guard = agent.lock().await;
+                agent_guard.session().pending_ask_user_question.clone()
+            };
+            if let Some(record) = persisted_pending {
+                super::ask_user_question::seed_pending_ask_user_question(&session_id, &record);
+            }
+            if let Some(event) =
+                super::ask_user_question::pending_ask_user_question_event(&session_id)
+            {
+                let _ = client_event_tx.send(event);
+            }
             crate::logging::event_info(
                 "SESSION_LIFECYCLE",
                 vec![

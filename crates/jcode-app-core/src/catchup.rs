@@ -279,6 +279,7 @@ fn is_attention_status(status: &SessionStatus) -> bool {
             | SessionStatus::Reloaded
             | SessionStatus::Compacted
             | SessionStatus::RateLimited
+            | SessionStatus::AwaitingUser
             | SessionStatus::Crashed { .. }
             | SessionStatus::Error { .. }
     )
@@ -301,6 +302,10 @@ fn reason_and_tags(status: &SessionStatus) -> (String, Vec<String>) {
         SessionStatus::RateLimited => (
             "Paused by rate limiting; decide whether to retry here or move on.".to_string(),
             vec!["waiting".to_string(), "rate limited".to_string()],
+        ),
+        SessionStatus::AwaitingUser => (
+            "Waiting for an answer to a blocking question.".to_string(),
+            vec!["awaiting answer".to_string(), "decision needed".to_string()],
         ),
         SessionStatus::Crashed { message } => (
             message
@@ -537,6 +542,7 @@ fn status_icon(status: &SessionStatus) -> &'static str {
         SessionStatus::RateLimited => "⏳",
         SessionStatus::Crashed { .. } | SessionStatus::Error { .. } => "🔴",
         SessionStatus::Active => "▶",
+        SessionStatus::AwaitingUser => "❓",
     }
 }
 
@@ -548,6 +554,7 @@ fn status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::RateLimited => "waiting",
         SessionStatus::Crashed { .. } | SessionStatus::Error { .. } => "failed",
         SessionStatus::Active => "active",
+        SessionStatus::AwaitingUser => "awaiting answer",
     }
 }
 

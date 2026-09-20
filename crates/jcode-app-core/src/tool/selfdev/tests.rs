@@ -37,6 +37,7 @@ fn create_test_context(session_id: &str, working_dir: Option<std::path::PathBuf>
         tool_call_id: "test-tool-call".to_string(),
         working_dir,
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }

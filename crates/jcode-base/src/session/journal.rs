@@ -35,6 +35,10 @@ pub(super) struct SessionJournalMeta {
     pub(super) is_debug: bool,
     pub(super) saved: bool,
     pub(super) save_label: Option<String>,
+    /// Blocking `ask_user_question` call awaiting an answer; carried through
+    /// the journal so a journal-rebuilt session can still re-present it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pending_ask_user_question: Option<jcode_session_types::PendingAskUserQuestion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,4 +97,5 @@ pub(super) fn metadata_requires_snapshot(
         || prev.is_debug != current.is_debug
         || prev.saved != current.saved
         || prev.save_label != current.save_label
+        || prev.pending_ask_user_question != current.pending_ask_user_question
 }

@@ -358,6 +358,7 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
             tool_call_id: "t".into(),
             working_dir: None,
             stdin_request_tx: None,
+            ask_user_question_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: super::super::ToolExecutionMode::Direct,
         };

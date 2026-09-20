@@ -7,6 +7,7 @@ fn make_ctx() -> ToolContext {
         tool_call_id: "test-call".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }

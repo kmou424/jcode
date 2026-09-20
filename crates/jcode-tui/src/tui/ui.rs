@@ -3045,13 +3045,24 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let user_count = app.display_user_message_count();
     let next_prompt = user_count + 1;
 
+    // While the blocking ask_user_question panel is open it owns the whole
+    // input surface: the normal composer (and its hint/suggestion row) is
+    // hidden, not merely disabled.
+    let ask_user_question_active = app.inline_ask_user_question_state().is_some();
     // Calculate input height based on the same wrapping logic used for rendering
     // (max 10 lines visible, scrolls if more).
-    let base_input_height =
-        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
+    let base_input_height = if ask_user_question_active {
+        0
+    } else {
+        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16
+    };
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
-    let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
+    let hint_line_height = if ask_user_question_active {
+        0
+    } else {
+        input_ui::input_hint_line_height(app)
+    };
+    let inline_block_height: u16 = inline_ui_height(app, chat_area.width, chat_area.height);
     let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
     let input_height = base_input_height + hint_line_height;
 
@@ -3494,13 +3505,19 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    let input_cursor = input_ui::draw_input(
-        frame,
-        app,
-        chunks[7],
-        user_count + pending_count + 1,
-        &mut debug_capture,
-    );
+    let input_cursor = if ask_user_question_active {
+        // The composer is hidden while the questionnaire owns the input
+        // surface; skip the draw entirely and report no cursor.
+        None
+    } else {
+        input_ui::draw_input(
+            frame,
+            app,
+            chunks[7],
+            user_count + pending_count + 1,
+            &mut debug_capture,
+        )
+    };
 
     if overscroll_height > 0 {
         input_ui::draw_overscroll_status(frame, app, chunks[8]);
@@ -3613,11 +3630,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)
     // instead of reserving layout height and shoving everything around.
-    input_ui::draw_command_suggestions_overlay(frame, app, chunks[7]);
+    // Both composer overlays are suppressed while the ask_user_question
+    // panel owns the input surface.
+    if !ask_user_question_active {
+        input_ui::draw_command_suggestions_overlay(frame, app, chunks[7]);
 
-    // Ctrl+R reverse prompt-history search overlay (drawn after the command
-    // palette so it wins when both could be visible).
-    input_ui::draw_prompt_history_search_overlay(frame, app, chunks[7]);
+        // Ctrl+R reverse prompt-history search overlay (drawn after the command
+        // palette so it wins when both could be visible).
+        input_ui::draw_prompt_history_search_overlay(frame, app, chunks[7]);
+    }
 
     // Observe the rendered messages area for the anchor-stability (smoothness)
     // report. Runs on the final buffer so it sees exactly what the user sees.

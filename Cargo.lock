@@ -4032,6 +4032,7 @@ dependencies = [
  "jcode-message-types",
  "memchr",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4136,6 +4137,7 @@ dependencies = [
  "async-trait",
  "jcode-agent-runtime",
  "jcode-message-types",
+ "jcode-session-types",
  "jcode-tool-types",
  "serde_json",
  "tokio",

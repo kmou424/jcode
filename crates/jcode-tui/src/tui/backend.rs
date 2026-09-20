@@ -945,6 +945,23 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Submit the questionnaire outcome for a pending `ask_user_question`
+    /// request; the server resolves the blocked tool call with it.
+    pub async fn send_ask_user_question_response(
+        &mut self,
+        request_id: String,
+        result: jcode_session_types::AskUserQuestionResult,
+    ) -> Result<()> {
+        let request = Request::AskUserQuestionResponse {
+            id: self.next_request_id,
+            request_id,
+            cancelled: result.cancelled,
+            answers: result.answers,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Launch a subagent immediately on the active remote session.
     pub async fn run_subagent(
         &mut self,

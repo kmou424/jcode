@@ -542,6 +542,18 @@ async fn apply_terminal_event(
             app.update_copy_badge_key_event(key);
             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_remote_key_event(app, key, remote).await?;
+                // The blocking ask_user_question questionnaire stages its
+                // outcome here; forward it so the parked tool call resolves.
+                if let Some((request_id, result)) = app.pending_ask_user_question_response.take()
+                    && let Err(error) = remote
+                        .send_ask_user_question_response(request_id, result)
+                        .await
+                {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to submit questionnaire answers: {}",
+                        error
+                    )));
+                }
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.pending_model_switch = None;
                     match remote.set_route_selection(selection).await {

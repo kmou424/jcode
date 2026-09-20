@@ -3,6 +3,9 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+pub mod ask_user_question;
+pub use ask_user_question::*;
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -159,6 +162,8 @@ pub enum SessionStatus {
     Reloaded,
     Compacted,
     RateLimited,
+    /// Blocked on an `ask_user_question` answer; the turn is parked, not dead.
+    AwaitingUser,
     Error {
         message: String,
     },
@@ -173,6 +178,7 @@ impl SessionStatus {
             SessionStatus::Reloaded => "reloaded",
             SessionStatus::Compacted => "compacted",
             SessionStatus::RateLimited => "rate limited",
+            SessionStatus::AwaitingUser => "awaiting answer",
             SessionStatus::Error { .. } => "error",
         }
     }
@@ -185,6 +191,7 @@ impl SessionStatus {
             SessionStatus::Reloaded => "🔄",
             SessionStatus::Compacted => "📦",
             SessionStatus::RateLimited => "⏳",
+            SessionStatus::AwaitingUser => "❓",
             SessionStatus::Error { .. } => "❌",
         }
     }

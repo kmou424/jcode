@@ -320,6 +320,7 @@ pub(super) fn handle_run_subagent(
             tool_call_id: tool_call_id.clone(),
             working_dir,
             stdin_request_tx: None,
+            ask_user_question_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         };

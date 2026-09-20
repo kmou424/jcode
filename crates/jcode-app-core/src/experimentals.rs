@@ -293,12 +293,14 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_tag_is_a_recognized_no_op_until_landed() {
+    fn ask_user_question_tag_registers_the_tool() {
         let mut tools = map_with_apply_patch();
         let tags = tags_of(&[tool_ask_user_question::TAG]);
-        // Recognized (no warning), but nothing is registered yet; the
-        // apply_patch removal still applies since no apply_patch tag is set.
         assert!(apply(&mut tools, &tags));
+        assert!(tools.contains_key(tool_ask_user_question::TOOL_NAME));
+        // A second pass is idempotent.
+        assert!(!apply(&mut tools, &tags));
+        // The apply_patch removal still applies since no apply_patch tag is set.
         assert!(!tools.contains_key("apply_patch"));
     }
 }

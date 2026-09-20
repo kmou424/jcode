@@ -790,6 +790,23 @@ pub(super) async fn handle_client(
         })
     };
 
+    // Set up ask_user_question forwarding: tools park on a oneshot while the
+    // question lives in the session-scoped pending registry, so a
+    // reconnecting client can still answer.
+    let (ask_user_question_tx, ask_user_question_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tool::AskUserQuestionRequest>();
+    {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.set_ask_user_question_tx(ask_user_question_tx.clone());
+    }
+    // Detached, not awaited: the forwarder keeps draining the channel while
+    // the agent lives — including past this connection's disconnect — so a
+    // retained turn's later questions still reach the pending registry.
+    let _ask_user_question_forwarder = super::ask_user_question::spawn_ask_user_question_forwarder(
+        ask_user_question_rx,
+        client_event_tx.clone(),
+    );
+
     // Do not drain global bus traffic until the client has completed its first
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
@@ -1216,6 +1233,14 @@ pub(super) async fn handle_client(
                     // later turn, without reviving any disconnected prompt.
                     if continue_on_disconnect && let Ok(mut agent) = agent.try_lock() {
                         agent.set_stdin_request_tx(stdin_req_tx.clone());
+                    }
+                    // ask_user_question is session-scoped rather than
+                    // transport-scoped: refresh it whenever this client
+                    // can touch the agent — including a retained session this
+                    // client reattached to — so the next question reaches the
+                    // attached client instead of a dead forwarder.
+                    if let Ok(mut agent) = agent.try_lock() {
+                        agent.set_ask_user_question_tx(ask_user_question_tx.clone());
                     }
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
@@ -2164,6 +2189,24 @@ pub(super) async fn handle_client(
                     .await;
             }
 
+            Request::AskUserQuestionResponse {
+                id,
+                request_id,
+                cancelled,
+                answers,
+            } => {
+                super::ask_user_question::handle_ask_user_question_response(
+                    id,
+                    &client_session_id,
+                    request_id,
+                    cancelled,
+                    answers,
+                    &agent,
+                    &client_event_tx,
+                )
+                .await;
+            }
+
             Request::AgentTask { id, task, .. } => {
                 handle_agent_task(
                     id,
@@ -2978,7 +3021,13 @@ pub(super) async fn handle_client(
     Ok(())
     }.await;
 
-    if continue_on_disconnect {
+    // A session blocked on ask_user_question retains the same way an opted-in
+    // remote client would: the parked turn is the only thing that can resolve
+    // the question, and the pending registry re-presents it to the next
+    // attachment.
+    let retain_for_pending_question =
+        super::ask_user_question::has_pending_ask_user_question(&client_session_id);
+    if continue_on_disconnect || retain_for_pending_question {
         // Retain the existing turn owner, not the socket. Its JoinHandle and
         // completion receiver stay alive so normal finalization still runs and
         // the daemon cannot idle-shutdown midway through remote work. New

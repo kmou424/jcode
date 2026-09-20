@@ -1736,6 +1736,7 @@ impl SessionPicker {
                         SessionStatus::Reloaded => format!("reloaded {}", ago),
                         SessionStatus::Compacted => format!("compacted {}", ago),
                         SessionStatus::RateLimited => format!("rate-limited {}", ago),
+                        SessionStatus::AwaitingUser => format!("awaiting answer {}", ago),
                         SessionStatus::Error { .. } => format!("errored {}", ago),
                     };
                     Span::styled(format!("  {}", label), Style::default().fg(dim_color))
@@ -1798,6 +1799,9 @@ impl SessionPicker {
                 rgb(255, 193, 7),
             ),
             SessionStatus::RateLimited => ("⏳", "Rate limited".to_string(), rgb(186, 139, 255)),
+            SessionStatus::AwaitingUser => {
+                ("❓", "Awaiting your answer".to_string(), rgb(186, 139, 255))
+            }
             SessionStatus::Error { message } => {
                 let text = format!("Error: {}", safe_truncate(message, 40));
                 ("❌", text, rgb(220, 100, 100))

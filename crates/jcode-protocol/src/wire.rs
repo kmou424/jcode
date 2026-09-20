@@ -388,6 +388,23 @@ pub enum Request {
         input: String,
     },
 
+    /// Submit answers (or a cancellation) for a pending `ask_user_question`
+    /// request. The structured answers mirror what the questionnaire UI
+    /// committed; `cancelled` follows the same abort semantics as an
+    /// interrupted stdin prompt.
+    #[serde(rename = "ask_user_question_response")]
+    AskUserQuestionResponse {
+        id: u64,
+        /// Matches the request_id from AskUserQuestion
+        request_id: String,
+        /// True when the user aborted instead of submitting.
+        #[serde(default)]
+        cancelled: bool,
+        /// Answers in question order; skipped questions are absent.
+        #[serde(default)]
+        answers: Vec<jcode_session_types::AskUserQuestionAnswer>,
+    },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -1551,5 +1568,18 @@ pub enum ServerEvent {
         is_password: bool,
         /// Tool call ID this is associated with
         tool_call_id: String,
+    },
+
+    /// The `ask_user_question` tool is blocked awaiting structured answers.
+    /// The client renders the questionnaire and replies with
+    /// `ask_user_question_response`. Re-emitted on (re)attach while pending.
+    #[serde(rename = "ask_user_question")]
+    AskUserQuestion {
+        /// Unique request ID for matching the response
+        request_id: String,
+        /// Session the question belongs to
+        session_id: String,
+        /// Normalized questions (headers filled, recommended option first)
+        questions: Vec<jcode_session_types::AskUserQuestion>,
     },
 }

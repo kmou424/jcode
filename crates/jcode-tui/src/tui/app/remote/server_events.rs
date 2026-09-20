@@ -3052,6 +3052,14 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::AskUserQuestion {
+            request_id,
+            questions,
+            ..
+        } => {
+            app.open_ask_user_question(request_id, questions);
+            true
+        }
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false

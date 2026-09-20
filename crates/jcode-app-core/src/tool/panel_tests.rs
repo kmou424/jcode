@@ -8,6 +8,7 @@ fn context(dir: &std::path::Path, session: &str) -> ToolContext {
         tool_call_id: uuid::Uuid::new_v4().to_string(),
         working_dir: Some(dir.into()),
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
     }

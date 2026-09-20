@@ -99,6 +99,25 @@ pub struct StdinInputRequest {
     pub response_tx: tokio::sync::oneshot::Sender<String>,
 }
 
+/// A request for structured user input from the `ask_user_question` tool.
+///
+/// Unlike [`StdinInputRequest`], the pending question survives a client
+/// disconnect: the server keeps the question in a session-scoped registry and
+/// re-presents it on re-attach, resolving `response_tx` when an answer (or a
+/// cancellation) arrives.
+pub struct AskUserQuestionRequest {
+    pub request_id: String,
+    /// Session that owns the blocked turn; keys the session-scoped pending
+    /// registry so a reconnecting client can still resolve the question.
+    pub session_id: String,
+    /// Tool call this question belongs to; anchors a late answer to its tool
+    /// result when the turn that asked it no longer exists (resume path).
+    pub tool_call_id: String,
+    /// Normalized questions (headers filled, recommended option first).
+    pub questions: Vec<jcode_session_types::AskUserQuestion>,
+    pub response_tx: tokio::sync::oneshot::Sender<jcode_session_types::AskUserQuestionResult>,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub session_id: String,
@@ -106,6 +125,7 @@ pub struct ToolContext {
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
+    pub ask_user_question_tx: Option<tokio::sync::mpsc::UnboundedSender<AskUserQuestionRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
 }
@@ -133,6 +153,7 @@ impl ToolContext {
             ),
             working_dir: self.working_dir.clone(),
             stdin_request_tx: self.stdin_request_tx.clone(),
+            ask_user_question_tx: self.ask_user_question_tx.clone(),
             graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
         }
@@ -191,6 +212,8 @@ mod tests {
             tool_call_id: "first-batch".into(),
             working_dir: None,
             stdin_request_tx: None,
+            ask_user_question_tx: None,
+
             graceful_shutdown_signal: None,
             execution_mode: ToolExecutionMode::AgentTurn,
         };

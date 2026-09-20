@@ -2704,6 +2704,13 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    // The blocking ask_user_question questionnaire owns input while open
+    // it takes precedence over pickers because it is what the
+    // session is waiting on.
+    if app.has_ask_user_question() {
+        return app.handle_ask_user_question_key(code, modifiers);
+    }
+
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {

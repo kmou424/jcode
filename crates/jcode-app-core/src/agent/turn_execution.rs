@@ -402,6 +402,14 @@ impl Agent {
         self.stdin_request_tx = Some(tx);
     }
 
+    /// Set the `ask_user_question` request channel for the attached client.
+    pub fn set_ask_user_question_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::tool::AskUserQuestionRequest>,
+    ) {
+        self.ask_user_question_tx = Some(tx);
+    }
+
     /// Prepare the static provider prefix while a client is idle. Unlike
     /// `tool_definitions`, this does not pin the tool snapshot or consume the
     /// one-shot late-MCP-discovery check before the first real turn.
@@ -676,6 +684,7 @@ impl Agent {
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
             stdin_request_tx: self.stdin_request_tx.clone(),
+            ask_user_question_tx: self.ask_user_question_tx.clone(),
             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
             execution_mode: ToolExecutionMode::Direct,
         };
