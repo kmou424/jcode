@@ -12,17 +12,64 @@ const FILE_TOUCH_PREVIEW_MAX_BYTES: usize = 240;
 
 pub struct ApplyPatchTool;
 
+/// Freeform (Responses `custom` tool) variant of `apply_patch`: on the wire
+/// it is declared with a Lark grammar so capable models emit the patch as raw
+/// text instead of JSON. The raw payload arrives wrapped as `{"input": ...}`.
+pub struct ApplyPatchFreeformTool;
+
 impl ApplyPatchTool {
     pub fn new() -> Self {
         Self
     }
 }
 
+impl ApplyPatchFreeformTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Lark grammar constraining freeform apply_patch output, matching the
+/// grammar codex-rs declares for its apply_patch custom tool.
+const APPLY_PATCH_LARK_GRAMMAR: &str = r#"start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF
+"#;
+
 #[derive(Deserialize)]
 struct ApplyPatchInput {
     #[serde(default)]
     intent: Option<String>,
     patch_text: String,
+}
+
+#[derive(Deserialize)]
+struct ApplyPatchFreeformInput {
+    #[serde(default)]
+    intent: Option<String>,
+    /// Raw patch text. Freeform calls arrive wrapped as `{"input": ...}`;
+    /// `patch_text` is accepted so the same tool body works if the payload
+    /// was normalized through the JSON path.
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    patch_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,185 +126,157 @@ impl Tool for ApplyPatchTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ApplyPatchInput = serde_json::from_value(input)?;
-        let hunks = parse_apply_patch(&params.patch_text)?;
+        apply_patch_text(&params.patch_text, params.intent.as_deref(), &ctx).await
+    }
+}
 
-        // A patch can reach config.toml through any hunk kind (add, update,
-        // move), so watch the file across the whole invocation rather than
-        // threading before/after content through each branch.
-        let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
+#[async_trait]
+impl Tool for ApplyPatchFreeformTool {
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
 
-        // Capture whole-file states, including move destinations and AddFile
-        // overwrites. Diff the final state so repeated hunks share one coordinate
-        // system and failed operations cannot produce a speculative preview.
-        let mut before = std::collections::BTreeMap::new();
-        for hunk in &hunks {
-            let (path, destination) = match hunk {
-                PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
-                PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
-            };
-            for path in std::iter::once(path).chain(destination) {
-                if !before.contains_key(path) {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    before.insert(path.clone(), super::file_diff::snapshot(&resolved).await);
+    fn description(&self) -> &str {
+        "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["input"],
+            "properties": {
+                "intent": super::intent_schema_property(),
+                "input": {
+                    "type": "string",
+                    "description": "Patch text (freeform)."
                 }
+            },
+            jcode_message_types::TOOL_FREEFORM_FORMAT_KEY: {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": APPLY_PATCH_LARK_GRAMMAR,
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let params: ApplyPatchFreeformInput = serde_json::from_value(input)?;
+        let patch_text = params
+            .input
+            .or(params.patch_text)
+            .ok_or_else(|| anyhow::anyhow!("missing patch text: expected 'input' string"))?;
+        apply_patch_text(&patch_text, params.intent.as_deref(), &ctx).await
+    }
+}
+
+async fn apply_patch_text(
+    patch_text: &str,
+    intent: Option<&str>,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let hunks = parse_apply_patch(patch_text)?;
+
+    // A patch can reach config.toml through any hunk kind (add, update,
+    // move), so watch the file across the whole invocation rather than
+    // threading before/after content through each branch.
+    let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
+
+    // Capture whole-file states, including move destinations and AddFile
+    // overwrites. Diff the final state so repeated hunks share one coordinate
+    // system and failed operations cannot produce a speculative preview.
+    let mut before = std::collections::BTreeMap::new();
+    for hunk in &hunks {
+        let (path, destination) = match hunk {
+            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
+            PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
+        };
+        for path in std::iter::once(path).chain(destination) {
+            if !before.contains_key(path) {
+                let resolved = ctx.resolve_path(Path::new(path));
+                before.insert(path.clone(), super::file_diff::snapshot(&resolved).await);
             }
         }
+    }
 
-        let mut results = Vec::new();
-        let mut touched_paths = Vec::new();
+    let mut results = Vec::new();
+    let mut touched_paths = Vec::new();
 
-        for hunk in &hunks {
-            match hunk {
-                PatchHunk::AddFile { path, contents } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    if let Some(parent) = resolved.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    let existed = resolved.exists();
-                    let old = tokio::fs::read_to_string(&resolved).await.ok();
-                    tokio::fs::write(&resolved, contents).await?;
-                    super::edit_stats::record(
-                        &ctx,
-                        old.as_deref().unwrap_or(""),
-                        contents,
-                        existed && old.is_none(),
-                    )
-                    .await;
-                    let diff = generate_diff_summary("", contents);
-                    publish_file_touch(
-                        &ctx,
-                        &resolved,
-                        path,
-                        "created",
-                        &diff,
-                        params.intent.as_deref(),
-                    );
+    for hunk in &hunks {
+        match hunk {
+            PatchHunk::AddFile { path, contents } => {
+                let resolved = ctx.resolve_path(Path::new(path));
+                if let Some(parent) = resolved.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                let existed = resolved.exists();
+                let old = tokio::fs::read_to_string(&resolved).await.ok();
+                tokio::fs::write(&resolved, contents).await?;
+                super::edit_stats::record(
+                    &ctx,
+                    old.as_deref().unwrap_or(""),
+                    contents,
+                    existed && old.is_none(),
+                )
+                .await;
+                let diff = generate_diff_summary("", contents);
+                publish_file_touch(&ctx, &resolved, path, "created", &diff, intent);
+                touched_paths.push(path.clone());
+                if diff.is_empty() {
+                    results.push(format!("✓ {}: created", path));
+                } else {
+                    results.push(format!("✓ {}: created\n{}", path, diff));
+                }
+            }
+            PatchHunk::DeleteFile { path } => {
+                let resolved = ctx.resolve_path(Path::new(path));
+                // `resolve_path` passes absolute paths through unchanged, so
+                // a patch can name any file on disk. The bash gate does not
+                // cover this path, so apply the same absolute deny here
+                // (#604). Only the catastrophic tier: ordinary file deletes
+                // are this tool's normal job.
+                let risk_ctx = jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
+                if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                    results.push(format!(
+                        "✗ {}: refused, this path is protected and must never \
+                             be deleted by an agent",
+                        path
+                    ));
+                    continue;
+                }
+                let old = tokio::fs::read_to_string(&resolved).await.ok();
+                let old_contents = old.as_deref().unwrap_or("");
+                if tokio::fs::remove_file(&resolved).await.is_ok() {
+                    super::edit_stats::record(&ctx, old_contents, "", old.is_none()).await;
+                    let diff = generate_diff_summary(&old_contents, "");
+                    publish_file_touch(&ctx, &resolved, path, "deleted", &diff, intent);
                     touched_paths.push(path.clone());
                     if diff.is_empty() {
-                        results.push(format!("✓ {}: created", path));
+                        results.push(format!("✓ {}: deleted", path));
                     } else {
-                        results.push(format!("✓ {}: created\n{}", path, diff));
+                        results.push(format!("✓ {}: deleted\n{}", path, diff));
                     }
+                } else {
+                    results.push(format!("✗ {}: failed to delete", path));
                 }
-                PatchHunk::DeleteFile { path } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    // `resolve_path` passes absolute paths through unchanged, so
-                    // a patch can name any file on disk. The bash gate does not
-                    // cover this path, so apply the same absolute deny here
-                    // (#604). Only the catastrophic tier: ordinary file deletes
-                    // are this tool's normal job.
-                    let risk_ctx =
-                        jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
-                    if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
-                        results.push(format!(
-                            "✗ {}: refused, this path is protected and must never \
-                             be deleted by an agent",
-                            path
-                        ));
-                        continue;
-                    }
-                    let old = tokio::fs::read_to_string(&resolved).await.ok();
-                    let old_contents = old.as_deref().unwrap_or("");
-                    if tokio::fs::remove_file(&resolved).await.is_ok() {
-                        super::edit_stats::record(&ctx, old_contents, "", old.is_none()).await;
-                        let diff = generate_diff_summary(&old_contents, "");
-                        publish_file_touch(
-                            &ctx,
-                            &resolved,
-                            path,
-                            "deleted",
-                            &diff,
-                            params.intent.as_deref(),
-                        );
-                        touched_paths.push(path.clone());
-                        if diff.is_empty() {
-                            results.push(format!("✓ {}: deleted", path));
-                        } else {
-                            results.push(format!("✓ {}: deleted\n{}", path, diff));
-                        }
-                    } else {
-                        results.push(format!("✗ {}: failed to delete", path));
-                    }
-                }
-                PatchHunk::UpdateFile {
-                    path,
-                    move_to,
-                    chunks,
-                } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    match apply_update_chunks(&resolved, chunks).await {
-                        Ok((old_contents, new_contents)) => {
-                            let diff = generate_diff_summary(&old_contents, &new_contents);
-                            if let Some(dest) = move_to {
-                                let dest_resolved = ctx.resolve_path(Path::new(dest));
-                                if let Some(parent) = dest_resolved.parent() {
-                                    tokio::fs::create_dir_all(parent).await?;
-                                }
-                                let dest_existed = dest_resolved.exists();
-                                let dest_old = tokio::fs::read_to_string(&dest_resolved).await.ok();
-                                tokio::fs::write(&dest_resolved, &new_contents).await?;
-                                if tokio::fs::remove_file(&resolved).await.is_ok() {
-                                    super::edit_stats::record(
-                                        &ctx,
-                                        &old_contents,
-                                        &new_contents,
-                                        false,
-                                    )
-                                    .await;
-                                    if dest_existed {
-                                        super::edit_stats::record(
-                                            &ctx,
-                                            dest_old.as_deref().unwrap_or(""),
-                                            "",
-                                            dest_old.is_none(),
-                                        )
-                                        .await;
-                                    }
-                                } else {
-                                    super::edit_stats::record(
-                                        &ctx,
-                                        dest_old.as_deref().unwrap_or(""),
-                                        &new_contents,
-                                        dest_existed && dest_old.is_none(),
-                                    )
-                                    .await;
-                                }
-                                publish_file_touch(
-                                    &ctx,
-                                    &resolved,
-                                    path,
-                                    "modified",
-                                    &diff,
-                                    params.intent.as_deref(),
-                                );
-                                publish_file_touch(
-                                    &ctx,
-                                    &dest_resolved,
-                                    dest,
-                                    "modified",
-                                    &diff,
-                                    params.intent.as_deref(),
-                                );
-                                touched_paths.push(path.clone());
-                                touched_paths.push(dest.clone());
-                                if diff.is_empty() {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks), moved to {}",
-                                        path,
-                                        chunks.len(),
-                                        dest
-                                    ));
-                                } else {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks), moved to {}\n{}",
-                                        path,
-                                        chunks.len(),
-                                        dest,
-                                        diff
-                                    ));
-                                }
-                            } else {
-                                tokio::fs::write(&resolved, &new_contents).await?;
+            }
+            PatchHunk::UpdateFile {
+                path,
+                move_to,
+                chunks,
+            } => {
+                let resolved = ctx.resolve_path(Path::new(path));
+                match apply_update_chunks(&resolved, chunks).await {
+                    Ok((old_contents, new_contents)) => {
+                        let diff = generate_diff_summary(&old_contents, &new_contents);
+                        if let Some(dest) = move_to {
+                            let dest_resolved = ctx.resolve_path(Path::new(dest));
+                            if let Some(parent) = dest_resolved.parent() {
+                                tokio::fs::create_dir_all(parent).await?;
+                            }
+                            let dest_existed = dest_resolved.exists();
+                            let dest_old = tokio::fs::read_to_string(&dest_resolved).await.ok();
+                            tokio::fs::write(&dest_resolved, &new_contents).await?;
+                            if tokio::fs::remove_file(&resolved).await.is_ok() {
                                 super::edit_stats::record(
                                     &ctx,
                                     &old_contents,
@@ -265,110 +284,151 @@ impl Tool for ApplyPatchTool {
                                     false,
                                 )
                                 .await;
-                                publish_file_touch(
-                                    &ctx,
-                                    &resolved,
-                                    path,
-                                    "modified",
-                                    &diff,
-                                    params.intent.as_deref(),
-                                );
-                                touched_paths.push(path.clone());
-                                if diff.is_empty() {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks)",
-                                        path,
-                                        chunks.len()
-                                    ));
-                                } else {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks)\n{}",
-                                        path,
-                                        chunks.len(),
-                                        diff
-                                    ));
+                                if dest_existed {
+                                    super::edit_stats::record(
+                                        &ctx,
+                                        dest_old.as_deref().unwrap_or(""),
+                                        "",
+                                        dest_old.is_none(),
+                                    )
+                                    .await;
                                 }
+                            } else {
+                                super::edit_stats::record(
+                                    &ctx,
+                                    dest_old.as_deref().unwrap_or(""),
+                                    &new_contents,
+                                    dest_existed && dest_old.is_none(),
+                                )
+                                .await;
+                            }
+                            publish_file_touch(&ctx, &resolved, path, "modified", &diff, intent);
+                            publish_file_touch(
+                                &ctx,
+                                &dest_resolved,
+                                dest,
+                                "modified",
+                                &diff,
+                                intent,
+                            );
+                            touched_paths.push(path.clone());
+                            touched_paths.push(dest.clone());
+                            if diff.is_empty() {
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks), moved to {}",
+                                    path,
+                                    chunks.len(),
+                                    dest
+                                ));
+                            } else {
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks), moved to {}\n{}",
+                                    path,
+                                    chunks.len(),
+                                    dest,
+                                    diff
+                                ));
+                            }
+                        } else {
+                            tokio::fs::write(&resolved, &new_contents).await?;
+                            super::edit_stats::record(&ctx, &old_contents, &new_contents, false)
+                                .await;
+                            publish_file_touch(&ctx, &resolved, path, "modified", &diff, intent);
+                            touched_paths.push(path.clone());
+                            if diff.is_empty() {
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks)",
+                                    path,
+                                    chunks.len()
+                                ));
+                            } else {
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks)\n{}",
+                                    path,
+                                    chunks.len(),
+                                    diff
+                                ));
                             }
                         }
-                        Err(e) => {
-                            results.push(format!("✗ {}: {}", path, e));
-                        }
+                    }
+                    Err(e) => {
+                        results.push(format!("✗ {}: {}", path, e));
                     }
                 }
             }
         }
+    }
 
-        if results.is_empty() {
-            Ok(ToolOutput::new("No changes applied"))
+    if results.is_empty() {
+        Ok(ToolOutput::new("No changes applied"))
+    } else {
+        let mut body = results.join("\n");
+        config_watch.finish(&mut body);
+        let mut unified = String::new();
+        let mut after = std::collections::BTreeMap::new();
+        for path in before.keys() {
+            after.insert(
+                path.clone(),
+                super::file_diff::snapshot(&ctx.resolve_path(Path::new(path))).await,
+            );
+        }
+        let mut combined = std::collections::BTreeSet::new();
+        // A simple successful move to a new path can retain the source's
+        // coordinates. For overwrites or move chains, keep net per-path
+        // diffs instead of hiding destination text that was overwritten.
+        for hunk in &hunks {
+            if let PatchHunk::UpdateFile {
+                path,
+                move_to: Some(dest),
+                ..
+            } = hunk
+                && let (
+                    Some(Some((true, old))),
+                    Some(Some((false, _))),
+                    Some(Some((false, _))),
+                    Some(Some((true, new))),
+                ) = (
+                    before.get(path),
+                    before.get(dest),
+                    after.get(path),
+                    after.get(dest),
+                )
+                && !combined.contains(path)
+                && !combined.contains(dest)
+            {
+                unified.push_str(&super::file_diff::unified(path, dest, old, new));
+                combined.insert(path.clone());
+                combined.insert(dest.clone());
+            }
+        }
+        for (path, old) in before {
+            if combined.contains(&path) {
+                continue;
+            }
+            if let (Some((old_exists, old)), Some(Some((new_exists, new)))) =
+                (old, after.remove(&path))
+            {
+                unified.push_str(&super::file_diff::unified(
+                    if old_exists || !new_exists {
+                        &path
+                    } else {
+                        "/dev/null"
+                    },
+                    if new_exists || !old_exists {
+                        &path
+                    } else {
+                        "/dev/null"
+                    },
+                    &old,
+                    &new,
+                ));
+            }
+        }
+        let output = super::file_diff::attach(ToolOutput::new(body), unified);
+        if touched_paths.len() == 1 {
+            Ok(output.with_title(touched_paths[0].clone()))
         } else {
-            let mut body = results.join("\n");
-            config_watch.finish(&mut body);
-            let mut unified = String::new();
-            let mut after = std::collections::BTreeMap::new();
-            for path in before.keys() {
-                after.insert(
-                    path.clone(),
-                    super::file_diff::snapshot(&ctx.resolve_path(Path::new(path))).await,
-                );
-            }
-            let mut combined = std::collections::BTreeSet::new();
-            // A simple successful move to a new path can retain the source's
-            // coordinates. For overwrites or move chains, keep net per-path
-            // diffs instead of hiding destination text that was overwritten.
-            for hunk in &hunks {
-                if let PatchHunk::UpdateFile {
-                    path,
-                    move_to: Some(dest),
-                    ..
-                } = hunk
-                    && let (
-                        Some(Some((true, old))),
-                        Some(Some((false, _))),
-                        Some(Some((false, _))),
-                        Some(Some((true, new))),
-                    ) = (
-                        before.get(path),
-                        before.get(dest),
-                        after.get(path),
-                        after.get(dest),
-                    )
-                    && !combined.contains(path)
-                    && !combined.contains(dest)
-                {
-                    unified.push_str(&super::file_diff::unified(path, dest, old, new));
-                    combined.insert(path.clone());
-                    combined.insert(dest.clone());
-                }
-            }
-            for (path, old) in before {
-                if combined.contains(&path) {
-                    continue;
-                }
-                if let (Some((old_exists, old)), Some(Some((new_exists, new)))) =
-                    (old, after.remove(&path))
-                {
-                    unified.push_str(&super::file_diff::unified(
-                        if old_exists || !new_exists {
-                            &path
-                        } else {
-                            "/dev/null"
-                        },
-                        if new_exists || !old_exists {
-                            &path
-                        } else {
-                            "/dev/null"
-                        },
-                        &old,
-                        &new,
-                    ));
-                }
-            }
-            let output = super::file_diff::attach(ToolOutput::new(body), unified);
-            if touched_paths.len() == 1 {
-                Ok(output.with_title(touched_paths[0].clone()))
-            } else {
-                Ok(output.with_title(format!("{} files", touched_paths.len())))
-            }
+            Ok(output.with_title(format!("{} files", touched_paths.len())))
         }
     }
 }

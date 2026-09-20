@@ -14,6 +14,14 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
+/// JSON Schema annotation carrying a tool's freeform (non-JSON) wire format,
+/// e.g. `{ "type": "grammar", "syntax": "lark", "definition": "..." }`.
+/// Provider adapters that support freeform tools (the OpenAI Responses API
+/// `custom` tool type) detect this key and emit the format object instead of
+/// function parameters; other adapters pass the schema through unchanged,
+/// where it degrades to an ordinary `input` string parameter.
+pub const TOOL_FREEFORM_FORMAT_KEY: &str = "x-jcode-freeform";
+
 /// Tool definition advertised to model providers.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolDefinition {
@@ -26,6 +34,13 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
+    /// The freeform wire format declared by this tool, if any. Presence of
+    /// this marker means the tool accepts a raw text `input` payload rather
+    /// than structured JSON arguments.
+    pub fn freeform_format(&self) -> Option<&serde_json::Value> {
+        self.input_schema.get(TOOL_FREEFORM_FORMAT_KEY)
+    }
+
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
         serde_json::json!({

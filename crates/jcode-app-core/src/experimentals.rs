@@ -50,6 +50,42 @@ fn apply_patch_surface_enabled(tags: &HashSet<String>) -> bool {
     tags.contains(tool_apply_patch::TAG) || tags.contains(tool_apply_patch_compat::TAG)
 }
 
+/// Built-in editing tools the apply_patch surface replaces when enabled.
+/// The two families are mutually exclusive: a model that can emit patches
+/// must not also see `edit`/`multiedit`/`write`/`patch`.
+pub const EDIT_FAMILY_TOOLS: &[&str] = &["edit", "multiedit", "write", "patch"];
+
+/// A fresh instance of a built-in editing tool by registry name. The base
+/// tools are stateless, so restoring the family after the apply_patch tags
+/// are removed is just a re-insert.
+fn edit_family_tool(name: &str) -> Option<Arc<dyn Tool>> {
+    let tool: Arc<dyn Tool> = match name {
+        "edit" => Arc::new(crate::tool::edit::EditTool::new()),
+        "multiedit" => Arc::new(crate::tool::multiedit::MultiEditTool::new()),
+        "write" => Arc::new(crate::tool::write::WriteTool::new()),
+        "patch" => Arc::new(crate::tool::patch::PatchTool::new()),
+        _ => return None,
+    };
+    Some(tool)
+}
+
+/// Detect the invalid configuration of both apply_patch tags on one model:
+/// `tool_apply_patch` (freeform) and `tool_apply_patch_compat` (JSON) are
+/// mutually exclusive. Returns a user-facing error message when both are set.
+pub fn patch_tag_conflict(tags: &HashSet<String>) -> Option<String> {
+    if tags.contains(tool_apply_patch::TAG) && tags.contains(tool_apply_patch_compat::TAG) {
+        Some(format!(
+            "Configuration error: `experimentals` lists both '{}' and '{}' on the active model. \
+             The two apply_patch variants are mutually exclusive; neither was enabled and the \
+             built-in editing tools remain available. Remove one tag to fix this.",
+            tool_apply_patch::TAG,
+            tool_apply_patch_compat::TAG
+        ))
+    } else {
+        None
+    }
+}
+
 /// Warn once per process about a tag this build does not implement. Called on
 /// every `apply` pass, so unknown tags must not spam the log on each request.
 fn warn_unknown_tag(tag: &str) {
@@ -70,10 +106,15 @@ fn warn_unknown_tag(tag: &str) {
 /// invalidate cached tool-definition snapshots.
 pub fn apply(tools: &mut ToolMap, tags: &HashSet<String>) -> bool {
     let mut changed = false;
+    // Both apply_patch tags configured is an error: enable neither variant
+    // and leave the built-in editing family untouched.
+    let patch_conflict = patch_tag_conflict(tags).is_some();
     for tag in KNOWN_TAGS.iter().copied().filter(|tag| tags.contains(*tag)) {
         changed |= match tag {
-            tool_apply_patch::TAG => tool_apply_patch::apply(tools),
-            tool_apply_patch_compat::TAG => tool_apply_patch_compat::apply(tools),
+            tool_apply_patch::TAG => !patch_conflict && tool_apply_patch::apply(tools),
+            tool_apply_patch_compat::TAG => {
+                !patch_conflict && tool_apply_patch_compat::apply(tools)
+            }
             tool_ask_user_question::TAG => tool_ask_user_question::apply(tools),
             _ => unreachable!("KNOWN_TAGS only lists dispatched tags"),
         };
@@ -83,8 +124,23 @@ pub fn apply(tools: &mut ToolMap, tags: &HashSet<String>) -> bool {
             warn_unknown_tag(tag);
         }
     }
-    if !apply_patch_surface_enabled(tags) {
+    if apply_patch_surface_enabled(tags) && !patch_conflict {
+        // The apply_patch surface replaces the built-in editing family.
+        for name in EDIT_FAMILY_TOOLS {
+            changed |= tools.remove(*name).is_some();
+        }
+    } else {
         changed |= tools.remove(tool_apply_patch::TOOL_NAME).is_some();
+        // Restore the built-in editing family when the apply_patch surface is
+        // not active (idempotent on a converged map).
+        for name in EDIT_FAMILY_TOOLS {
+            if !tools.contains_key(*name)
+                && let Some(tool) = edit_family_tool(name)
+            {
+                tools.insert((*name).to_string(), tool);
+                changed = true;
+            }
+        }
     }
     changed
 }
@@ -99,6 +155,17 @@ mod tests {
             tool_apply_patch::TOOL_NAME.to_string(),
             Arc::new(crate::tool::apply_patch::ApplyPatchTool::new()) as Arc<dyn Tool>,
         );
+        tools
+    }
+
+    fn map_with_edit_family() -> ToolMap {
+        let mut tools = ToolMap::new();
+        for name in EDIT_FAMILY_TOOLS {
+            tools.insert(
+                (*name).to_string(),
+                edit_family_tool(name).expect("known edit family tool"),
+            );
+        }
         tools
     }
 
@@ -121,6 +188,90 @@ mod tests {
         let tags = tags_of(&[tool_apply_patch::TAG]);
         assert!(apply(&mut tools, &tags));
         assert!(tools.contains_key("apply_patch"));
+        assert!(!apply(&mut tools, &tags));
+    }
+
+    #[test]
+    fn freeform_tag_registers_the_freeform_variant() {
+        let mut tools = ToolMap::new();
+        let tags = tags_of(&[tool_apply_patch::TAG]);
+        apply(&mut tools, &tags);
+        let tool = tools.get("apply_patch").expect("apply_patch registered");
+        let def = tool.to_definition();
+        assert!(
+            def.freeform_format().is_some(),
+            "freeform variant must declare a grammar format"
+        );
+    }
+
+    #[test]
+    fn compat_tag_registers_the_json_variant() {
+        let mut tools = ToolMap::new();
+        let tags = tags_of(&[tool_apply_patch_compat::TAG]);
+        apply(&mut tools, &tags);
+        let tool = tools.get("apply_patch").expect("apply_patch registered");
+        let def = tool.to_definition();
+        assert!(def.freeform_format().is_none());
+        assert!(
+            def.input_schema
+                .get("properties")
+                .and_then(|p| p.get("patch_text"))
+                .is_some(),
+            "compat variant keeps the patch_text JSON parameter"
+        );
+    }
+
+    #[test]
+    fn any_apply_patch_tag_removes_the_edit_family() {
+        for tag in [tool_apply_patch::TAG, tool_apply_patch_compat::TAG] {
+            let mut tools = map_with_edit_family();
+            let tags = tags_of(&[tag]);
+            assert!(apply(&mut tools, &tags));
+            assert!(tools.contains_key("apply_patch"));
+            for name in EDIT_FAMILY_TOOLS {
+                assert!(
+                    !tools.contains_key(*name),
+                    "{name} must be removed while {tag} is active"
+                );
+            }
+            // Converged on a second pass.
+            assert!(!apply(&mut tools, &tags));
+        }
+    }
+
+    #[test]
+    fn edit_family_returns_when_tags_are_removed() {
+        let mut tools = map_with_edit_family();
+        let tags = tags_of(&[tool_apply_patch::TAG]);
+        assert!(apply(&mut tools, &tags));
+        for name in EDIT_FAMILY_TOOLS {
+            assert!(!tools.contains_key(*name));
+        }
+        // Switching to a model without the tag restores the family and drops
+        // apply_patch.
+        assert!(apply(&mut tools, &HashSet::new()));
+        assert!(!tools.contains_key("apply_patch"));
+        for name in EDIT_FAMILY_TOOLS {
+            assert!(tools.contains_key(*name), "{name} must be restored");
+        }
+        assert!(!apply(&mut tools, &HashSet::new()));
+    }
+
+    #[test]
+    fn both_patch_tags_is_a_conflict_enabling_neither() {
+        let mut tools = map_with_edit_family();
+        tools.insert(
+            tool_apply_patch::TOOL_NAME.to_string(),
+            Arc::new(crate::tool::apply_patch::ApplyPatchTool::new()) as Arc<dyn Tool>,
+        );
+        let tags = tags_of(&[tool_apply_patch::TAG, tool_apply_patch_compat::TAG]);
+        assert!(patch_tag_conflict(&tags).is_some());
+        assert!(apply(&mut tools, &tags));
+        // Neither patch variant is enabled; the edit family stays.
+        assert!(!tools.contains_key("apply_patch"));
+        for name in EDIT_FAMILY_TOOLS {
+            assert!(tools.contains_key(*name));
+        }
         assert!(!apply(&mut tools, &tags));
     }
 

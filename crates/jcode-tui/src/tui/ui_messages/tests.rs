@@ -2892,7 +2892,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
 }
 
 #[test]
-fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
+fn render_tool_message_marks_failed_apply_patch_with_error_diff() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content:
@@ -2921,7 +2921,13 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
         plain.trim_start().starts_with("✗ apply_patch"),
         "plain={plain}"
     );
-    assert!(!plain.contains("┌─ diff"), "plain={plain}");
+    // The `✗` gate in the stored result produces an Error row, so the diff
+    // card shows the failure in red instead of disappearing entirely.
+    assert!(plain.contains("┌─ diff · /tmp/main.rs"), "plain={plain}");
+    assert!(
+        plain.contains("✗ Error: Failed to find expected lines"),
+        "plain={plain}"
+    );
     assert!(!plain.contains("(+0 -0)"), "plain={plain}");
 }
 

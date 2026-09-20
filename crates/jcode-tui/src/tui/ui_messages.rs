@@ -3448,12 +3448,7 @@ pub(crate) fn render_swarm_message(
 }
 
 fn edit_tool_inline_diff_lines(tc: &ToolCall, content: &str) -> Option<Vec<ParsedDiffLine>> {
-    let from_content = collect_diff_lines(content);
-    let change_lines = if !from_content.is_empty() {
-        from_content
-    } else {
-        generate_diff_lines_from_tool_input(tc)
-    };
+    let change_lines = crate::tui::ui_diff::diff_lines_for_tool_message(tc, content);
     (!change_lines.is_empty()).then_some(change_lines)
 }
 
@@ -4406,7 +4401,8 @@ pub(crate) fn render_tool_message(
             .map(str::to_string)
             .or_else(|| {
                 tc.input
-                    .get("patch_text")
+                    .get("input")
+                    .or_else(|| tc.input.get("patch_text"))
                     .and_then(|v| v.as_str())
                     .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
                         "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
@@ -4481,10 +4477,10 @@ pub(crate) fn render_tool_message(
             }
             previous_file_path = current_file_path.clone();
 
-            let base_color = if line.kind == DiffLineKind::Add {
-                diff_add_color()
-            } else {
-                diff_del_color()
+            let base_color = match line.kind {
+                DiffLineKind::Add => diff_add_color(),
+                DiffLineKind::Sep => dim_color(),
+                DiffLineKind::Del | DiffLineKind::Error => diff_del_color(),
             };
 
             let border_prefix = format!("{}│ ", pad_str);

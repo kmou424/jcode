@@ -51,6 +51,17 @@ pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
+            // Freeform tools (e.g. apply_patch for GPT models) are declared on
+            // the Responses wire as a `custom` tool carrying its grammar
+            // format; parameters are not emitted at all.
+            if let Some(format) = t.freeform_format() {
+                return serde_json::json!({
+                    "type": "custom",
+                    "name": t.name,
+                    "description": t.description,
+                    "format": format,
+                });
+            }
             let compatible_schema = openai_compatible_schema(&t.input_schema);
             let supports_strict = schema_supports_strict(&compatible_schema);
             let parameters = if supports_strict {
@@ -258,17 +269,32 @@ pub fn build_responses_input_with_logger(
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
-                            let arguments = if input.is_object() {
-                                serde_json::to_string(&input).unwrap_or_default()
+                            // Freeform (custom) tool calls store their raw
+                            // payload under `input`; replay them as
+                            // custom_tool_call items so the wire matches the
+                            // declared custom tool.
+                            let is_freeform = name == "apply_patch"
+                                && input.get("input").is_some_and(|value| value.is_string());
+                            if is_freeform {
+                                items.push(serde_json::json!({
+                                    "type": "custom_tool_call",
+                                    "name": name,
+                                    "input": input.get("input").cloned().unwrap_or_default(),
+                                    "call_id": sanitize_tool_id(id)
+                                }));
                             } else {
-                                "{}".to_string()
-                            };
-                            items.push(serde_json::json!({
-                                "type": "function_call",
-                                "name": name,
-                                "arguments": arguments,
-                                "call_id": sanitize_tool_id(id)
-                            }));
+                                let arguments = if input.is_object() {
+                                    serde_json::to_string(&input).unwrap_or_default()
+                                } else {
+                                    "{}".to_string()
+                                };
+                                items.push(serde_json::json!({
+                                    "type": "function_call",
+                                    "name": name,
+                                    "arguments": arguments,
+                                    "call_id": sanitize_tool_id(id)
+                                }));
+                            }
 
                             if let Some(output) = pending_outputs.remove(id.as_str()) {
                                 items.push(serde_json::json!({
@@ -558,8 +584,112 @@ pub fn build_responses_input_with_logger(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jcode_message_types::ToolDefinition;
+    use jcode_message_types::{ContentBlock, Message as ChatMessage, Role, ToolDefinition};
     use serde_json::json;
+
+    #[test]
+    fn build_tools_emits_custom_tool_for_freeform_definitions() {
+        let defs = vec![ToolDefinition {
+            name: "apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["input"],
+                "properties": {
+                    "input": { "type": "string" }
+                },
+                jcode_message_types::TOOL_FREEFORM_FORMAT_KEY: {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: begin_patch hunk+ end_patch"
+                }
+            }),
+        }];
+
+        let api_tools = build_tools(&defs);
+        assert_eq!(api_tools.len(), 1);
+        let tool = &api_tools[0];
+        assert_eq!(tool["type"], json!("custom"));
+        assert_eq!(tool["name"], json!("apply_patch"));
+        assert_eq!(tool["description"], json!("Apply a patch"));
+        assert!(tool.get("parameters").is_none());
+        assert!(tool.get("strict").is_none());
+        assert_eq!(
+            tool["format"],
+            json!({
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch hunk+ end_patch"
+            })
+        );
+    }
+
+    #[test]
+    fn build_tools_keeps_function_shape_without_freeform_marker() {
+        let defs = vec![ToolDefinition {
+            name: "read".to_string(),
+            description: "Read".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "file_path": { "type": "string" } }
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert_eq!(api_tools[0]["type"], json!("function"));
+        assert!(api_tools[0].get("parameters").is_some());
+    }
+
+    #[test]
+    fn responses_input_replays_freeform_call_as_custom_tool_call() {
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "apply_patch".to_string(),
+                input: json!({ "input": "*** Begin Patch\n*** End Patch" }),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        let items = build_responses_input(&messages);
+        let call = items
+            .iter()
+            .find(|item| item["type"] == json!("custom_tool_call"))
+            .expect("custom_tool_call item");
+        assert_eq!(call["name"], json!("apply_patch"));
+        assert_eq!(call["input"], json!("*** Begin Patch\n*** End Patch"));
+    }
+
+    #[test]
+    fn responses_input_replays_json_apply_patch_as_function_call() {
+        // The compat variant stores structured `patch_text` arguments; it
+        // must not be mistaken for a freeform call on replay.
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "apply_patch".to_string(),
+                input: json!({ "patch_text": "*** Begin Patch\n*** End Patch" }),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        let items = build_responses_input(&messages);
+        assert!(
+            items
+                .iter()
+                .any(|item| item["type"] == json!("function_call")
+                    && item["name"] == json!("apply_patch")),
+            "expected function_call replay, got {items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item["type"] == json!("custom_tool_call"))
+        );
+    }
 
     #[test]
     fn build_tools_flattens_allof_schema_for_openai() {

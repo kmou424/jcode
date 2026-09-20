@@ -266,6 +266,9 @@ pub struct Agent {
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
+    /// Whether the `experimentals` mutual-exclusion error was already surfaced
+    /// to the user this session (the warning fires once per session).
+    experimentals_conflict_reported: bool,
 }
 
 impl Agent {
@@ -342,6 +345,7 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             concurrency_session: None,
+            experimentals_conflict_reported: false,
         }
     }
 

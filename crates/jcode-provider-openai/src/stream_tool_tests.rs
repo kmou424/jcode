@@ -214,7 +214,11 @@ fn mismatched_done_arguments_fail_instead_of_corrupting_tool_input() {
 }
 
 #[test]
-fn custom_tool_input_events_stream_before_completion() {
+fn custom_tool_input_is_buffered_and_wrapped_into_json() {
+    // Freeform (custom) tool input is raw text, not JSON. Raw fragments cannot
+    // be wrapped incrementally, so nothing streams until the call completes;
+    // the single emitted delta is the payload wrapped as `{"input": ...}` so
+    // the downstream ToolCall input stays a JSON object.
     let (tx, mut stream) = stream();
     send(
         &tx,
@@ -227,13 +231,55 @@ fn custom_tool_input_events_stream_before_completion() {
         &tx,
         json!({"type":"response.custom_tool_call_input.delta", "item_id":"a", "delta":"*** Begin Patch\n"}),
     );
-    assert_delta(&mut stream, "*** Begin Patch\n");
     idle(&mut stream);
     send(
         &tx,
         json!({"type":"response.custom_tool_call_input.done", "item_id":"a", "input":"*** Begin Patch\n*** End Patch"}),
     );
-    assert_delta(&mut stream, "*** End Patch");
+    assert_delta(
+        &mut stream,
+        &json!({"input": "*** Begin Patch\n*** End Patch"}).to_string(),
+    );
     assert!(matches!(next(&mut stream), StreamEvent::ToolUseEnd));
     idle(&mut stream);
+}
+
+#[test]
+fn custom_tool_done_only_call_is_wrapped_into_json() {
+    // A custom call that arrives without prior output_item.added or deltas is
+    // still marked by the custom_tool_call_input.done event name.
+    let (tx, mut stream) = stream();
+    send(
+        &tx,
+        json!({"type":"response.custom_tool_call_input.done", "item_id":"a",
+        "call_id":"call_a", "name":"apply_patch", "input":"*** Begin Patch\n*** End Patch"}),
+    );
+    assert_start(&mut stream, "a", "apply_patch");
+    assert_delta(
+        &mut stream,
+        &json!({"input": "*** Begin Patch\n*** End Patch"}).to_string(),
+    );
+    assert!(matches!(next(&mut stream), StreamEvent::ToolUseEnd));
+    idle(&mut stream);
+}
+
+#[test]
+fn output_item_custom_tool_call_wraps_input() {
+    let mut saw_text = false;
+    let mut saw_thinking = false;
+    let mut pending = VecDeque::new();
+    let item = json!({
+        "type": "custom_tool_call",
+        "call_id": "call_a",
+        "name": "apply_patch",
+        "input": "*** Begin Patch\n*** End Patch"
+    });
+    let first = handle_openai_output_item(item, &mut saw_text, &mut saw_thinking, &mut pending);
+    assert!(matches!(first, Some(StreamEvent::ToolUseStart { .. })));
+    assert!(matches!(
+        pending.pop_front(),
+        Some(StreamEvent::ToolInputDelta(delta))
+            if delta == json!({"input": "*** Begin Patch\n*** End Patch"}).to_string()
+    ));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
 }

@@ -1568,7 +1568,8 @@ fn render_message_into(
                         .map(str::to_string)
                         .or_else(|| {
                             tc.input
-                                .get("patch_text")
+                                .get("input")
+                                .or_else(|| tc.input.get("patch_text"))
                                 .and_then(|v| v.as_str())
                                 .and_then(|patch_text| {
                                     match tools_ui::canonical_tool_name(&tc.name) {

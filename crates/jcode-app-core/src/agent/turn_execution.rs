@@ -426,11 +426,20 @@ impl Agent {
         // live tool map before consulting the locked snapshot so a model
         // switch surfaces on the next request (one intentional cache miss,
         // same trade as the late-MCP rebuild).
-        if self
-            .registry
-            .apply_experimentals(&self.active_experimentals())
-            .await
+        let experimentals = self.active_experimentals();
+        if !self.experimentals_conflict_reported
+            && let Some(conflict) = crate::experimentals::patch_tag_conflict(&experimentals)
         {
+            self.experimentals_conflict_reported = true;
+            self.queue_soft_interrupt(
+                conflict.clone(),
+                Vec::new(),
+                false,
+                crate::agent::SoftInterruptSource::System,
+            );
+            logging::warn(&conflict);
+        }
+        if self.registry.apply_experimentals(&experimentals).await {
             self.unlock_tools();
         }
 
