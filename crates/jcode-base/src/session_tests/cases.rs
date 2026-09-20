@@ -2372,6 +2372,54 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
     );
 }
 
+#[test]
+fn model_switch_notice_is_model_visible_but_hidden_from_transcript() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "original request".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    session.append_model_switch_notice(
+        "openai/gpt-6-astra",
+        "anthropic/claude-opus-4.6(Claude Opus 4.6)",
+    );
+
+    let notice = session.messages.last().expect("switch notice appended");
+    assert_eq!(notice.role, Role::User);
+    assert_eq!(notice.display_role, Some(StoredDisplayRole::System));
+    let text = notice.content_preview();
+    assert!(text.contains("<system-reminder>"));
+    assert!(text.contains("Model switched: openai/gpt-6-astra"));
+    assert!(text.contains("anthropic/claude-opus-4.6(Claude Opus 4.6)"));
+
+    // Model-visible: included in the provider message list.
+    let provider_messages = session.messages_for_provider_uncached();
+    assert!(
+        provider_messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text.contains("Model switched:")
+                )
+            })
+        }),
+        "switch notice must reach the model"
+    );
+
+    // Transcript-hidden: not rendered as a visible user message.
+    let (rendered, _) = render_messages_and_images(&session);
+    assert!(
+        !rendered
+            .iter()
+            .any(|message| message.role == "user" && message.content.contains("Model switched:")),
+        "switch notice must not render as a visible user message"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_guard_creates_visible_macos_sleep_assertion() {

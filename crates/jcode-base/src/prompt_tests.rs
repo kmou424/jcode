@@ -25,6 +25,7 @@ fn mermaid_prompt_module_follows_capability() {
         None,
         None,
         PromptCapabilities { mermaid: true },
+        None,
     );
     assert!(enabled.static_part.contains(MERMAID_PROMPT));
 
@@ -35,6 +36,7 @@ fn mermaid_prompt_module_follows_capability() {
         None,
         None,
         PromptCapabilities { mermaid: false },
+        None,
     );
     assert!(!disabled.static_part.contains("Mermaid diagrams"));
     assert!(!disabled.static_part.contains("fenced `mermaid` code block"));
@@ -103,7 +105,7 @@ fn full_and_split_prompt_builders_use_the_same_one_line_skill_descriptions() {
     let expected = build_available_skills_section(&skills).expect("skills section");
 
     let (full, full_info) = build_system_prompt_full(None, &skills, false, None, None);
-    let (split, split_info) = build_system_prompt_split(None, &skills, false, None, None);
+    let (split, split_info) = build_system_prompt_split(None, &skills, false, None, None, None);
 
     assert!(full.contains(&expected));
     assert!(split.static_part.contains(&expected));
@@ -210,6 +212,7 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
         None,
         Some(project_dir.path()),
         snapshot.clone(),
+        None,
     );
     std::fs::write(&agents_md, "instructions written during the session").unwrap();
     let (after, _) = build_system_prompt_split_with_agents_md(
@@ -219,6 +222,7 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
         None,
         Some(project_dir.path()),
         snapshot,
+        None,
     );
 
     assert_eq!(before.static_part, after.static_part);
@@ -239,6 +243,7 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
         None,
         Some(project_dir.path()),
         fresh_snapshot,
+        None,
     );
     assert!(
         next_session
@@ -329,7 +334,7 @@ fn session_datetime_formats_utc_fallback_deterministically() {
 
 #[test]
 fn test_split_prompt_does_not_inject_session_context_per_turn() {
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
+    let (split, _info) = build_system_prompt_split(None, &[], false, None, None, None);
     assert!(!split.dynamic_part.contains("# Session Context"));
     assert!(!split.dynamic_part.contains("Time: "));
     assert!(!split.dynamic_part.contains("Timezone: UTC"));
@@ -337,7 +342,7 @@ fn test_split_prompt_does_not_inject_session_context_per_turn() {
 
 #[test]
 fn sponsored_discovery_is_not_injected_into_the_system_prompt() {
-    let (split, _) = build_system_prompt_split(None, &[], false, None, None);
+    let (split, _) = build_system_prompt_split(None, &[], false, None, None, None);
     assert!(!split.static_part.contains("Discoverable Tools"));
     assert!(!split.static_part.contains("integration_tools"));
 }
@@ -436,7 +441,7 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     assert!(info.preferred_tools_chars > 0);
 
     let (split, split_info) =
-        build_system_prompt_split(None, &[], false, None, Some(project_dir.path()));
+        build_system_prompt_split(None, &[], false, None, Some(project_dir.path()), None);
     assert!(
         split
             .static_part
@@ -526,7 +531,7 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 #[test]
 fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
     let repo_dir = std::path::Path::new("/tmp/jcode");
-    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
+    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir), None);
     assert!(
         split
             .static_part
@@ -550,7 +555,7 @@ fn test_selfdev_prompt_prefers_publish_flow_for_active_builds() {
 #[test]
 fn test_selfdev_prompt_welcomes_outside_contributions() {
     let full = build_system_prompt_with_selfdev(None, &[], true);
-    let (split, _) = build_system_prompt_split(None, &[], true, None, None);
+    let (split, _) = build_system_prompt_split(None, &[], true, None, None, None);
 
     for prompt in [&full, &split.static_part] {
         assert!(prompt.contains("Pull requests from everyone are welcome"));
@@ -574,7 +579,7 @@ fn test_selfdev_prompt_template_placeholders_are_resolved() {
 
 #[test]
 fn split_prompt_estimated_tokens_is_positive_when_populated() {
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
+    let (split, _info) = build_system_prompt_split(None, &[], false, None, None, None);
     assert!(split.chars() > 0);
     assert!(split.estimated_tokens() > 0);
 }
@@ -694,7 +699,7 @@ fn desktop_prompt_auto_detects_and_overrides_cli_in_full_and_split_modes() {
             let (full, full_info) =
                 build_system_prompt_full(None, &[], cli_selfdev, None, Some(&cwd));
             let (split, split_info) =
-                build_system_prompt_split(None, &[], cli_selfdev, None, Some(&cwd));
+                build_system_prompt_split(None, &[], cli_selfdev, None, Some(&cwd), None);
             for prompt in [&full, &split.static_part] {
                 assert!(prompt.contains("# Jcode Desktop Self-Development Mode"));
                 assert!(prompt.contains(DESKTOP_SELFDEV_MODE_PROMPT));
@@ -722,7 +727,7 @@ fn desktop_prompt_leaves_normal_and_cli_sessions_unchanged() {
         let (full, full_info) =
             build_system_prompt_full(None, &[], cli_selfdev, None, Some(unrelated.path()));
         let (split, split_info) =
-            build_system_prompt_split(None, &[], cli_selfdev, None, Some(unrelated.path()));
+            build_system_prompt_split(None, &[], cli_selfdev, None, Some(unrelated.path()), None);
         for prompt in [&full, &split.static_part] {
             assert!(!prompt.contains("# Jcode Desktop Self-Development Mode"));
             assert_eq!(prompt.contains("# Self-Development Mode"), cli_selfdev);
@@ -772,7 +777,7 @@ fn desktop_prompt_detects_symlinked_nested_working_directory() {
     let link = links.path().join("renamed-ui");
     std::os::unix::fs::symlink(root.path().join("crates/jcode-desktop-ui/src"), &link).unwrap();
     let (full, _) = build_system_prompt_full(None, &[], false, None, Some(&link));
-    let (split, _) = build_system_prompt_split(None, &[], false, None, Some(&link));
+    let (split, _) = build_system_prompt_split(None, &[], false, None, Some(&link), None);
     assert!(full.contains(DESKTOP_SELFDEV_MODE_PROMPT));
     assert!(split.static_part.contains(DESKTOP_SELFDEV_MODE_PROMPT));
 }
@@ -806,7 +811,8 @@ fn prompt_guidance_same_project_and_global_paths_are_loaded_once() {
         std::fs::write(home.join(".jcode/preferred-tools.md"), tools).unwrap();
 
         let (full, full_info) = build_system_prompt_full(None, &[], false, None, Some(home));
-        let (split, split_info) = build_system_prompt_split(None, &[], false, None, Some(home));
+        let (split, split_info) =
+            build_system_prompt_split(None, &[], false, None, Some(home), None);
         for prompt in [&full, &split.static_part] {
             assert_eq!(prompt.matches(overlay.trim()).count(), 1);
             assert_eq!(prompt.matches(tools.trim()).count(), 1);
@@ -894,4 +900,56 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
             }
         }
     });
+}
+
+#[test]
+fn model_identity_line_replaces_placeholder_in_identity_section() {
+    let mut base = DEFAULT_SYSTEM_PROMPT.to_string();
+    apply_model_identity(&mut base, Some("openai/gpt-6-astra(GPT-6 Astra)"));
+
+    assert!(base.contains("You are jcode, an agent powered by openai/gpt-6-astra(GPT-6 Astra)."));
+    assert!(!base.contains("{{MODEL_IDENTITY}}"));
+    // The line belongs to the built-in ## Identity section, i.e. it lands
+    // before the next section heading.
+    let identity_pos = base.find("## Identity").unwrap();
+    let line_pos = base.find("You are jcode, an agent powered by").unwrap();
+    let next_section_pos = base[identity_pos..].find("\n## ").unwrap() + identity_pos;
+    assert!(line_pos > identity_pos && line_pos < next_section_pos);
+}
+
+#[test]
+fn model_identity_appends_section_when_base_prompt_has_no_placeholder() {
+    let mut base = "# Custom\n\nUser supplied prompt.".to_string();
+    apply_model_identity(&mut base, Some("openai/gpt-6-astra"));
+
+    assert!(base.contains("# Model Identity"));
+    assert!(base.contains("You are jcode, an agent powered by openai/gpt-6-astra."));
+}
+
+#[test]
+fn model_identity_falls_back_to_route_when_no_display_name() {
+    let (split, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        (None, ContextInfo::default()),
+        Some("openai/gpt-6-astra"),
+    );
+
+    assert!(
+        split
+            .static_part
+            .contains("You are jcode, an agent powered by openai/gpt-6-astra.")
+    );
+}
+
+#[test]
+fn missing_model_identity_strips_placeholder_line() {
+    let mut base = DEFAULT_SYSTEM_PROMPT.to_string();
+    apply_model_identity(&mut base, None);
+
+    assert!(!base.contains("{{MODEL_IDENTITY}}"));
+    assert!(!base.contains("powered by"));
 }

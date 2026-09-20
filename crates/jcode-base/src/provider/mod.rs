@@ -299,6 +299,40 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
     }
 }
 
+/// `provider/model` route label identifying what `provider` is currently
+/// serving, including any explicit provider pin (`model@pin`). The
+/// system-prompt model identity line and model-switch history notices both use
+/// this label so they always describe the resolved route.
+pub fn provider_route_label(provider: &dyn Provider) -> String {
+    let model = provider.model();
+    let model = provider
+        .explicit_provider_pin_for_current_model()
+        .map(|pin| format!("{model}@{pin}"))
+        .unwrap_or(model);
+    format!("{}/{}", provider.display_name(), model)
+}
+
+/// Model identity label for the system prompt `## Identity` line:
+/// `provider/model(display_name)` when a `display_name` is configured for the
+/// active model under `provider_key`, else the bare `provider/model` route.
+pub fn model_identity_label(provider: &dyn Provider, provider_key: Option<&str>) -> String {
+    let route = provider_route_label(provider);
+    let model = provider.model();
+    let model = provider
+        .explicit_provider_pin_for_current_model()
+        .map(|pin| format!("{model}@{pin}"))
+        .unwrap_or(model);
+    match crate::provider_catalog::named_provider_model_display_name_for_provider_key(
+        provider_key,
+        &model,
+    ) {
+        Some(display) if !display.trim().is_empty() => {
+            format!("{}({})", route, display.trim())
+        }
+        _ => route,
+    }
+}
+
 use self::dispatch::CompletionMode;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,

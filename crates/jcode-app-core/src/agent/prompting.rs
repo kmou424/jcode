@@ -149,6 +149,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
+        let model_identity = self.model_identity_label();
         let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             &available_skills,
@@ -156,6 +157,7 @@ impl Agent {
             memory_prompt,
             working_dir.as_deref(),
             self.agents_md_snapshot.clone(),
+            Some(model_identity.as_str()),
         );
 
         self.append_current_turn_system_reminder(&mut split);

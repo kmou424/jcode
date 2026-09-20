@@ -100,6 +100,45 @@ impl Agent {
         self.model_display_name_for(&model)
     }
 
+    /// `provider/model` route label identifying what the provider is currently
+    /// serving. Used in the system prompt identity line and model-switch
+    /// notices so the label always reflects the resolved route.
+    pub(crate) fn provider_route_label(&self) -> String {
+        crate::provider::provider_route_label(self.provider.as_ref())
+    }
+
+    /// Model identity label rendered inside the built-in system prompt's
+    /// `## Identity` section: `display_name (provider/model)` when a
+    /// `display_name` is configured for the active model, else `provider/model`.
+    pub(crate) fn model_identity_label(&self) -> String {
+        crate::provider::model_identity_label(
+            self.provider.as_ref(),
+            self.session.provider_key.as_deref(),
+        )
+    }
+
+    /// Record a mid-conversation model switch in session history as a hidden
+    /// `<system-reminder>` note so the model knows earlier turns were produced
+    /// by a different model. Skipped for initial model selection on an empty
+    /// session and for selections that resolve to the same route.
+    fn record_model_switch_notice(&mut self, previous_label: &str) {
+        if self.session.visible_conversation_message_count() == 0 {
+            return;
+        }
+        let route = self.provider_route_label();
+        if route == previous_label {
+            return;
+        }
+        let next_label = match self.provider_model_display_name() {
+            Some(display) if !display.trim().is_empty() => {
+                format!("{}({})", route, display.trim())
+            }
+            _ => route,
+        };
+        self.session
+            .append_model_switch_notice(previous_label, &next_label);
+    }
+
     /// Server-resolved context window for the current model, for the wire
     /// `model_context_window` field (remote clients cannot resolve the
     /// server's per-model config themselves).
@@ -199,6 +238,7 @@ impl Agent {
         selection: &crate::provider::RouteSelection,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_label = self.provider_route_label();
         self.provider.set_route_selection(selection)?;
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
@@ -208,6 +248,7 @@ impl Agent {
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
+        self.record_model_switch_notice(&previous_label);
         self.persist_session_best_effort("route selection");
         self.log_env_snapshot("set_route_selection");
         Ok(())
@@ -225,6 +266,7 @@ impl Agent {
         model: &str,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_label = self.provider_route_label();
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         let resolved_model = self.provider.model();
         self.session.provider_key =
@@ -238,6 +280,7 @@ impl Agent {
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
+        self.record_model_switch_notice(&previous_label);
         self.persist_session_best_effort("model selection");
         self.log_env_snapshot("set_model");
         Ok(())

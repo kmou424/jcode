@@ -1514,6 +1514,7 @@ mod tests {
         let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.provider_key = Some("test-effort".to_string());
         session.model = Some(provider.model());
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             Arc::clone(&provider_dyn),
@@ -1628,5 +1629,111 @@ mod tests {
                 error: None,
             }) if service_tier == "priority"
         ));
+    }
+
+    fn seed_visible_user_turn(agent: &mut Agent) {
+        agent.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: None,
+            }],
+        );
+    }
+
+    /// Collect the `Model switched:` notice texts currently bound for the
+    /// provider, i.e. what the model itself would see on the next turn.
+    fn model_switch_notice_texts(agent: &mut Agent) -> Vec<String> {
+        agent
+            .provider_messages()
+            .iter()
+            .flat_map(|message| {
+                message.content.iter().filter_map(|block| match block {
+                    crate::message::ContentBlock::Text { text, .. }
+                        if text.contains("Model switched:") =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_model_injects_switch_notice_after_visible_conversation() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+
+        let (_provider, agent, client_event_tx, mut client_event_rx) =
+            test_agent("session_model_switch_notice").await;
+        {
+            let mut guard = agent.lock().await;
+            seed_visible_user_turn(&mut guard);
+        }
+
+        handle_set_model(11, "test-model-b".to_string(), &agent, &client_event_tx).await;
+        let _ = client_event_rx.recv().await;
+
+        let mut guard = agent.lock().await;
+        let notices = model_switch_notice_texts(&mut guard);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0],
+            "<system-reminder>\nModel switched: test-effort/test-model-a \u{2192} test-effort/test-model-b\n</system-reminder>"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_model_before_any_conversation_skips_switch_notice() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+
+        let (_provider, agent, client_event_tx, mut client_event_rx) =
+            test_agent("session_model_switch_initial").await;
+
+        handle_set_model(12, "test-model-b".to_string(), &agent, &client_event_tx).await;
+        let _ = client_event_rx.recv().await;
+
+        let mut guard = agent.lock().await;
+        assert!(model_switch_notice_texts(&mut guard).is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_model_same_route_skips_switch_notice() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+
+        let (_provider, agent, client_event_tx, mut client_event_rx) =
+            test_agent("session_model_switch_same").await;
+        {
+            let mut guard = agent.lock().await;
+            seed_visible_user_turn(&mut guard);
+        }
+
+        handle_set_model(13, "test-model-a".to_string(), &agent, &client_event_tx).await;
+        let _ = client_event_rx.recv().await;
+
+        let mut guard = agent.lock().await;
+        assert!(model_switch_notice_texts(&mut guard).is_empty());
+    }
+
+    #[tokio::test]
+    async fn system_prompt_names_active_model_identity() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+
+        let (_provider, agent, _client_event_tx, _client_event_rx) =
+            test_agent("session_model_identity").await;
+
+        let guard = agent.lock().await;
+        let context = guard.debug_context().await;
+        let static_prompt = context["system_prompt"]["static"]
+            .as_str()
+            .expect("static system prompt");
+        assert!(
+            static_prompt.contains("You are jcode, an agent powered by test-effort/test-model-a."),
+            "static prompt should carry the active model identity line"
+        );
     }
 }

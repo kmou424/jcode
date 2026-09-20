@@ -1063,6 +1063,27 @@ request in this new forked session, using the inherited conversation only as con
         );
     }
 
+    /// Record a mid-conversation model switch as a provider-visible
+    /// `<system-reminder>` user message. Earlier assistant turns were produced
+    /// by the previous model while the system prompt now names the new one;
+    /// this note keeps the transcript self-explanatory for the model without
+    /// surfacing in the visible transcript (`StoredDisplayRole::System`).
+    /// `previous_label`/`next_label` use the `provider/model` route format,
+    /// optionally followed by `(display name)` on the new side.
+    pub fn append_model_switch_notice(&mut self, previous_label: &str, next_label: &str) {
+        let text = format!(
+            "<system-reminder>\nModel switched: {previous_label} \u{2192} {next_label}\n</system-reminder>"
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+    }
+
     /// Mark this session as a canary tester
     pub fn set_canary(&mut self, build_hash: &str) {
         self.is_canary = true;

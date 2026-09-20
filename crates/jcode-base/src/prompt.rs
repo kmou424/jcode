@@ -54,11 +54,61 @@ impl PromptCapabilities {
     }
 }
 
+/// Placeholder line in the built-in system prompt that is replaced at build
+/// time with the active model identity sentence, or removed entirely when no
+/// model identity is supplied. Lives on its own line inside the `## Identity`
+/// section of `prompt/system_prompt.md`.
+const MODEL_IDENTITY_PLACEHOLDER: &str = "{{MODEL_IDENTITY}}";
+
+/// System-prompt section appended when the loaded base prompt has no
+/// [`MODEL_IDENTITY_PLACEHOLDER`] line (e.g. a user-supplied
+/// `system-prompt.md`) but a model identity is available. Keeps the identity
+/// visible to the model even under a full prompt replacement.
+const MODEL_IDENTITY_FALLBACK_SECTION: &str = "# Model Identity";
+
+/// Render the `## Identity` model line for `identity`, where `identity` is the
+/// pre-formatted model label (e.g. `GPT-6 Astra (openai/gpt-6-astra)` or
+/// `openai/gpt-6-astra` when no display name is configured).
+fn model_identity_line(identity: &str) -> String {
+    format!("You are jcode, an agent powered by {identity}.")
+}
+
+fn apply_model_identity(base: &mut String, model_identity: Option<&str>) {
+    match model_identity
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty())
+    {
+        Some(identity) => {
+            let line = model_identity_line(identity);
+            if base.contains(MODEL_IDENTITY_PLACEHOLDER) {
+                *base = base.replace(MODEL_IDENTITY_PLACEHOLDER, &line);
+            } else {
+                base.push_str("\n\n");
+                base.push_str(MODEL_IDENTITY_FALLBACK_SECTION);
+                base.push_str("\n\n");
+                base.push_str(&line);
+            }
+        }
+        None => {
+            if base.contains(MODEL_IDENTITY_PLACEHOLDER) {
+                *base = base
+                    .lines()
+                    .filter(|line| !line.contains(MODEL_IDENTITY_PLACEHOLDER))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+        }
+    }
+}
+
 fn base_system_prompt_parts(
     capabilities: PromptCapabilities,
     working_dir: Option<&Path>,
+    model_identity: Option<&str>,
 ) -> Vec<String> {
-    let mut parts = vec![load_base_system_prompt(working_dir)];
+    let mut base = load_base_system_prompt(working_dir);
+    apply_model_identity(&mut base, model_identity);
+    let mut parts = vec![base];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
@@ -456,7 +506,7 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (String, ContextInfo) {
-    let mut parts = base_system_prompt_parts(capabilities, working_dir);
+    let mut parts = base_system_prompt_parts(capabilities, working_dir, None);
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
         ..Default::default()
@@ -528,6 +578,7 @@ pub fn build_system_prompt_split(
     is_selfdev: bool,
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
+    model_identity: Option<&str>,
 ) -> (SplitSystemPrompt, ContextInfo) {
     build_system_prompt_split_with_capabilities(
         skill_prompt,
@@ -536,6 +587,7 @@ pub fn build_system_prompt_split(
         memory_prompt,
         working_dir,
         PromptCapabilities::current(),
+        model_identity,
     )
 }
 
@@ -546,6 +598,7 @@ pub fn build_system_prompt_split_with_capabilities(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
+    model_identity: Option<&str>,
 ) -> (SplitSystemPrompt, ContextInfo) {
     let agents_md = load_agents_md_files_from_dir(working_dir);
     build_system_prompt_split_with_capabilities_and_agents_md(
@@ -556,6 +609,7 @@ pub fn build_system_prompt_split_with_capabilities(
         working_dir,
         capabilities,
         agents_md,
+        model_identity,
     )
 }
 
@@ -563,7 +617,9 @@ pub fn build_system_prompt_split_with_capabilities(
 ///
 /// Long-lived agents use this to keep their provider-cache prefix stable when a
 /// tool edits AGENTS.md during the session. New sessions still capture the
-/// latest instructions.
+/// latest instructions. `model_identity` is the pre-formatted active model
+/// label (e.g. `GPT-6 Astra (openai/gpt-6-astra)`); it is substituted into the
+/// built-in prompt's `## Identity` section.
 pub fn build_system_prompt_split_with_agents_md(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -571,6 +627,7 @@ pub fn build_system_prompt_split_with_agents_md(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
     agents_md: (Option<String>, ContextInfo),
+    model_identity: Option<&str>,
 ) -> (SplitSystemPrompt, ContextInfo) {
     build_system_prompt_split_with_capabilities_and_agents_md(
         skill_prompt,
@@ -580,6 +637,7 @@ pub fn build_system_prompt_split_with_agents_md(
         working_dir,
         PromptCapabilities::current(),
         agents_md,
+        model_identity,
     )
 }
 
@@ -591,8 +649,9 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
     agents_md: (Option<String>, ContextInfo),
+    model_identity: Option<&str>,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    let mut static_parts = base_system_prompt_parts(capabilities, working_dir, model_identity);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
