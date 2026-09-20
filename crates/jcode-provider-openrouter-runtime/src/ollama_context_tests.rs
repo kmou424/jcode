@@ -56,6 +56,7 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            experimentals: Vec::new(),
         }],
         ..Default::default()
     };

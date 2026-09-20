@@ -1285,6 +1285,7 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
                 reasoning_effort: None,
                 context_window: Some(1_000_000),
                 input: Vec::new(),
+                experimentals: Vec::new(),
             }],
             ..Default::default()
         },
@@ -1322,6 +1323,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    experimentals: Vec::new(),
                 },
                 NamedProviderModelConfig {
                     display_name: None,
@@ -1330,6 +1332,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    experimentals: Vec::new(),
                 },
             ],
             ..Default::default()
