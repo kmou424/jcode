@@ -545,6 +545,18 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    let needs_redraw = handle_server_event_inner(app, event, remote);
+    // SSH sessions report lifecycle to herdr from the client side; the
+    // remote server cannot reach the local multiplexer.
+    super::super::herdr_report::observe(app);
+    needs_redraw
+}
+
+fn handle_server_event_inner(
+    app: &mut App,
+    event: ServerEvent,
+    remote: &mut impl RemoteEventState,
+) -> bool {
     if let ServerEvent::Done { id } = &event
         && app.usage_reset.invalidate_requests.remove(id).is_some()
     {

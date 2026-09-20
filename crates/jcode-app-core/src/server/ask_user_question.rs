@@ -218,6 +218,8 @@ async fn inject_orphaned_answer(
             session.status = SessionStatus::Active;
         }
         let _ = session.save();
+        // The blocked turn is gone; the session is back at the prompt.
+        crate::herdr::report_for_session(crate::herdr::AgentState::Idle, Some(session_id), None);
         return;
     }
     let session = agent_guard.session_mut();
@@ -231,4 +233,5 @@ async fn inject_orphaned_answer(
             "ask_user_question: failed to persist orphaned answer on session {session_id}: {error}"
         ));
     }
+    crate::herdr::report_for_session(crate::herdr::AgentState::Idle, Some(session_id), None);
 }

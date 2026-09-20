@@ -156,6 +156,11 @@ impl Agent {
     /// submission and the first tool call. No-op (without building the payload)
     /// when the hook is not configured.
     fn fire_turn_start_hook(&self, source: &str) {
+        crate::herdr::report_for_session(
+            crate::herdr::AgentState::Working,
+            Some(&self.session.id),
+            None,
+        );
         if !crate::hooks::hook_configured("turn_start") {
             return;
         }
@@ -177,6 +182,11 @@ impl Agent {
         started_at: Instant,
         start_message_index: usize,
     ) {
+        crate::herdr::report_for_session(
+            crate::herdr::AgentState::Idle,
+            Some(&self.session.id),
+            None,
+        );
         if !crate::hooks::hook_configured("turn_end") {
             return;
         }

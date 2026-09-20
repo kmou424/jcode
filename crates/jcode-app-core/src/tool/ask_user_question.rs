@@ -131,6 +131,11 @@ impl Tool for AskUserQuestionTool {
         // Persist before blocking so a crash, detach or resume can still
         // re-present the question and anchor a late answer to this tool call.
         record_pending_in_session(&ctx.session_id, &request_id, &ctx.tool_call_id, &questions);
+        crate::herdr::report_for_session(
+            crate::herdr::AgentState::Blocked,
+            Some(&ctx.session_id),
+            Some("awaiting answer"),
+        );
 
         let result = if let Some(tx) = ctx.ask_user_question_tx.clone() {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -161,6 +166,13 @@ impl Tool for AskUserQuestionTool {
         };
 
         clear_pending_in_session(&ctx.session_id);
+        // The answer (or cancellation) lets the turn continue, so the agent
+        // is working again until turn_end settles it back to idle.
+        crate::herdr::report_for_session(
+            crate::herdr::AgentState::Working,
+            Some(&ctx.session_id),
+            None,
+        );
 
         if result.cancelled {
             return Ok(ToolOutput::new("User cancelled the questionnaire"));

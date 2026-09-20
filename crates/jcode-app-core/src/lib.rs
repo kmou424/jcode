@@ -33,6 +33,7 @@ pub mod catchup;
 pub mod channel;
 pub use jcode_base::external_auth;
 pub mod experimentals;
+pub mod herdr;
 pub mod mission;
 pub mod network_retry;
 pub mod notifications;
