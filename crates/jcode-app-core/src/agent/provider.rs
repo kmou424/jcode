@@ -204,6 +204,7 @@ impl Agent {
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        self.mirror_session_model();
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -233,6 +234,7 @@ impl Agent {
                 self.session.provider_key.as_deref(),
             );
         self.session.model = Some(self.provider_model());
+        self.mirror_session_model();
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -295,6 +297,19 @@ impl Agent {
         self.session.provider_key.clone()
     }
 
+    /// Mirror the active model identity into the deadlock-free side-table so
+    /// tools running inside this agent's own turn (e.g. `git_commit`'s
+    /// `${model}` sign-off resolution) can read it by session id without
+    /// taking the agent lock. Called wherever `session.model` or
+    /// `session.provider_key` is (re)assigned.
+    pub(crate) fn mirror_session_model(&self) {
+        crate::session_model::record_session_model(
+            &self.session.id,
+            self.session.provider_key.as_deref(),
+            &self.provider_model(),
+        );
+    }
+
     /// API method/runtime route used to select the active model (e.g.
     /// "openai-api", "claude-oauth", "openai-compatible:nvidia-nim"). Spawned
     /// swarm agents inherit this so they reconstruct the coordinator's exact
@@ -313,6 +328,7 @@ impl Agent {
 
     pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
         self.session.provider_key = provider_key;
+        self.mirror_session_model();
     }
 
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {

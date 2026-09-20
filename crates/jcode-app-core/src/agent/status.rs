@@ -215,6 +215,7 @@ impl Agent {
             self.session.model = Some(self.provider_model());
             self.session.provider_key = Some("openrouter".to_string());
             self.session.route_api_method = Some("openrouter".to_string());
+            self.mirror_session_model();
         }
     }
 

@@ -1080,6 +1080,7 @@ impl Agent {
                     model_at_request_start, model_after_stream
                 ));
                 self.session.model = Some(self.provider_model());
+                self.mirror_session_model();
                 self.provider_runtime_state.apply(
                     crate::provider::ProviderStateEvent::RuntimeModelObserved {
                         model: model_after_stream.clone(),

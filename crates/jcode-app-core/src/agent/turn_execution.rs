@@ -219,6 +219,7 @@ impl Agent {
         self.session.mark_closed();
         self.finish_concurrency_tracking();
         self.persist_session_best_effort("pre-clear session close state");
+        let previous_session_id = self.session.id.clone();
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
@@ -233,6 +234,8 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        crate::session_model::forget_session_model(&previous_session_id);
+        self.mirror_session_model();
         self.begin_concurrency_tracking();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
@@ -853,6 +856,7 @@ impl Agent {
         } else {
             self.session.model = Some(self.provider_model());
         }
+        self.mirror_session_model();
         self.restore_reasoning_effort_from_session();
         let model_ms = model_start.elapsed().as_millis();
 

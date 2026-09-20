@@ -439,6 +439,7 @@ impl Agent {
         agent.session.mark_active();
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
+        agent.mirror_session_model();
         agent.reconcile_explicit_provider_pin_route();
         agent.session.ensure_initial_session_context_message();
         agent.seed_compaction_from_session();
@@ -510,6 +511,7 @@ impl Agent {
         } else {
             agent.session.model = Some(agent.provider_model());
         }
+        agent.mirror_session_model();
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();

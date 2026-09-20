@@ -734,6 +734,23 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// `[tools.git]` configuration for the git_commit/git_checkpoint tools.
+    pub git: GitToolsConfig,
+}
+
+/// `[tools.git]` — server-side behavior of the `git_commit`/`git_checkpoint`
+/// tools. First of the per-tool `[tools.<name>]` subtables.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitToolsConfig {
+    /// `Co-Authored-By` name `git_commit` injects as the trailer. The literal
+    /// `${model}` resolves to the session's model display name and `${user}`
+    /// to git `user.name`; anything else is used verbatim. When unset (with
+    /// `signoff_email`), no trailer is appended.
+    pub signoff_name: Option<String>,
+    /// `Co-Authored-By` email `git_commit` injects as the trailer. Accepts the
+    /// same `${model}`/`${user}` placeholders as `signoff_name`.
+    pub signoff_email: Option<String>,
 }
 
 impl Default for ToolConfig {
@@ -745,6 +762,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            git: GitToolsConfig::default(),
         }
     }
 }
