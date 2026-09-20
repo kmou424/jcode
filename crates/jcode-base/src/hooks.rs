@@ -94,6 +94,25 @@ where
     CLIENT_TERMINAL_ENV.scope(env, future).await
 }
 
+/// Read one terminal-identity variable for the current request.
+///
+/// Inside [`with_client_terminal_env`] the value comes from the connecting
+/// client's snapshot; an empty snapshot is authoritative, so a missing key
+/// does not fall back to the server's own inherited environment (which would
+/// point at whichever pane happened to start the daemon). Outside that scope,
+/// in processes that are themselves the client, the process environment is
+/// used.
+pub fn client_terminal_env_value(key: &str) -> Option<String> {
+    match CLIENT_TERMINAL_ENV.try_with(|env| {
+        env.iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.clone())
+    }) {
+        Ok(value) => value.filter(|value| !value.is_empty()),
+        Err(_) => std::env::var(key).ok().filter(|value| !value.is_empty()),
+    }
+}
+
 /// The configured commands for `event`, in declaration order.
 pub fn hook_commands(event: &str) -> Vec<String> {
     if hooks_suppressed() {

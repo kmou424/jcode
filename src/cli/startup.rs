@@ -142,7 +142,11 @@ pub async fn run() -> Result<()> {
     let args = parse_and_prepare_args(args)?;
     spawn_background_update_check(&args);
 
-    if let Err(e) = dispatch::run_main(args).await {
+    let result = dispatch::run_main(args).await;
+    // The pane-hosting process is leaving; release its herdr agent
+    // entry. No-op unless this process actually reported (registered).
+    crate::herdr::release_if_registered();
+    if let Err(e) = result {
         report_main_error(&e);
         return Err(e);
     }

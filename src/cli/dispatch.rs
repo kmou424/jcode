@@ -64,6 +64,8 @@ fn arm_debug_client_parent_death_signal() {
             || current_parent_pid != parent_pid
             || parent_is_orphan_adopter(current_parent_pid))
     {
+        // Same bypass as the other direct exits.
+        crate::herdr::release_if_registered();
         std::process::exit(0);
     }
 }

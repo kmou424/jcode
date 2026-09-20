@@ -624,6 +624,8 @@ fn handle_termination_signal(sig: i32) -> ! {
         print_session_resume_hint(&session_id);
     }
 
+    // This exit bypasses run_main's return; release the pane agent.
+    crate::herdr::release_if_registered();
     std::process::exit(128 + sig);
 }
 

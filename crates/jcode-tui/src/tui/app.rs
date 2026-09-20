@@ -69,6 +69,7 @@ mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
+mod herdr_report;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
@@ -1299,6 +1300,9 @@ pub struct App {
     tool_output_scan_index: usize,
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
+    // Last (state, session) reported to herdr by `herdr_report::observe` in
+    // SSH mode, so reports are emitted only on transitions.
+    herdr_reported: Option<(jcode_app_core::herdr::AgentState, Option<String>)>,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,

@@ -196,6 +196,9 @@ pub async fn run_tui_client(
     tui_runtime.finish_for_run_result(&run_result, false);
 
     if let Some(code) = run_result.exit_code {
+        // Bypassing run_main's return, so the pane agent must be
+        // released here since process::exit never reaches the startup hook.
+        crate::herdr::release_if_registered();
         std::process::exit(code);
     }
 

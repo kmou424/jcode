@@ -1021,6 +1021,14 @@ impl Agent {
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
     /// No-op when the hook is not configured.
     pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
+        // herdr has no "done" state: a session settling at the prompt is
+        // `idle` whether it just attached or just closed.
+        crate::herdr::report_session_identity(&self.session.id);
+        crate::herdr::report_for_session(
+            crate::herdr::AgentState::Idle,
+            Some(&self.session.id),
+            None,
+        );
         if !crate::hooks::hook_configured(event_name) {
             return;
         }
