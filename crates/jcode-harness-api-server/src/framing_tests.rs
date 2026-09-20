@@ -92,6 +92,9 @@ async fn aggregate_pdf_base64_payload_fits_transport_frame() {
     let input = format!("{{\"pdf_data\":\"{payload}\"}}\n");
     let mut reader = BufReader::new(input.as_bytes());
     let mut line = String::new();
-    assert_eq!(read_frame(&mut reader, &mut line).await.unwrap(), input.len());
+    assert_eq!(
+        read_frame(&mut reader, &mut line).await.unwrap(),
+        input.len()
+    );
     assert_eq!(line, input);
 }

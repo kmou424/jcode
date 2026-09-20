@@ -471,7 +471,9 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
+                    Outbound::Legacy(
+                        json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true}),
+                    ),
                 ]
             }
             "send_message" => {
@@ -1193,7 +1195,9 @@ impl BridgeState {
                 let session_id = event["session_id"].as_str().or(self.session_id.as_deref());
                 match (session_id, event.get("snapshot")) {
                     (Some(session_id), Some(snapshot)) if !snapshot.is_null() => {
-                        Self::side_panel_frame(session_id, snapshot).into_iter().collect()
+                        Self::side_panel_frame(session_id, snapshot)
+                            .into_iter()
+                            .collect()
                     }
                     _ => vec![],
                 }
