@@ -27,12 +27,17 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
+        let model_identity = crate::provider::model_identity_label(
+            self.provider.as_ref(),
+            self.session.provider_key.as_deref(),
+        );
         let (mut split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
             None,
+            Some(model_identity.as_str()),
         );
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(
