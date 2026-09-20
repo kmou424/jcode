@@ -117,6 +117,7 @@ fn context(root: &Path) -> ToolContext {
         tool_call_id: "remote-test-call".into(),
         working_dir: Some(root.into()),
         stdin_request_tx: None,
+        ask_user_question_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }

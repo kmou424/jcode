@@ -118,7 +118,10 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
     for preview in [true, false] {
         let mut state = model_picker_state();
         state.inline_interactive_state.as_mut().unwrap().preview = preview;
-        assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state), 0);
+        assert_eq!(
+            crate::tui::ui::inline_ui::inline_ui_height(&state, 100, 40),
+            0
+        );
         let lines = render_model_suggestions(&state, 120, 20, 12);
         let text = lines.join("\n");
         assert!(text.contains("GPT-5.4"), "{text}");
@@ -182,12 +185,60 @@ fn model_suggestions_show_empty_filter_and_route_notices() {
 fn non_model_pickers_still_reserve_inline_panel_height() {
     let mut state = model_picker_state();
     state.inline_interactive_state.as_mut().unwrap().kind = crate::tui::PickerKind::Login;
-    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state) > 0);
+    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state, 100, 40) > 0);
     assert!(
         render_model_suggestions(&state, 100, 20, 12)
             .iter()
             .all(|line| line.trim().is_empty())
     );
+}
+
+fn ask_question_state() -> TestState {
+    let option = |label: &str| jcode_session_types::AskUserQuestionOption {
+        label: label.to_string(),
+        description: None,
+        preview: None,
+        recommended: None,
+    };
+    let question = |text: &str| jcode_session_types::AskUserQuestion {
+        question: text.to_string(),
+        header: None,
+        options: vec![option("A"), option("B"), option("C"), option("D")],
+        multi_select: None,
+    };
+    TestState {
+        inline_ask_user_question_state: Some(crate::tui::InlineAskUserQuestionState::new(
+            "req-1".to_string(),
+            vec![
+                question("First?"),
+                question("Second?"),
+                question("Third?"),
+                question("Fourth?"),
+            ],
+        )),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ask_user_question_panel_never_exceeds_60_percent_of_window() {
+    let state = ask_question_state();
+    // The composer is hidden while the panel is open, so the cap is 60% of
+    // the window height (28 rows absolute).
+    assert_eq!(
+        crate::tui::ui::inline_ui::inline_ui_height(&state, 120, 20),
+        12,
+        "0.6 * 20 rows"
+    );
+    assert_eq!(
+        crate::tui::ui::inline_ui::inline_ui_height(&state, 120, 10),
+        6,
+        "0.6 * 10 rows"
+    );
+    // On a tall window the panel may use its natural height (still under
+    // the proportional cap).
+    let tall = crate::tui::ui::inline_ui::inline_ui_height(&state, 120, 80);
+    assert!(tall > 12 && tall <= 28, "tall window got {tall}");
 }
 
 #[test]

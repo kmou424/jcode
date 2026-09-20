@@ -337,6 +337,16 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // The blocking ask_user_question questionnaire owns input while open
+    // it takes precedence over pickers because it is what the
+    // session is waiting on. Its answer is staged into
+    // `pending_ask_user_question_response` for the caller's remote drain.
+    if app.has_ask_user_question() {
+        return app
+            .handle_ask_user_question_key(code, modifiers)
+            .map(|_| ());
+    }
+
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {

@@ -6,6 +6,19 @@ impl Agent {
         &self.session
     }
 
+    /// Read-only session access for the server layer: re-presenting a
+    /// persisted pending `ask_user_question` on session restore.
+    pub(crate) fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Mutable session access for the server layer: orphaned
+    /// `ask_user_question` answers are written into session history when the
+    /// blocked tool call can no longer be resolved directly.
+    pub(crate) fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

@@ -10,6 +10,7 @@ fn context(session: &str, call: &str) -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        ask_user_question_tx: None,
     }
 }
 

@@ -19,6 +19,7 @@ fn ctx(session: &str) -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        ask_user_question_tx: None,
     }
 }
 struct Cleanup(String);

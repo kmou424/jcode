@@ -226,7 +226,9 @@ fn derive_visual_state(
         Ok(SessionStatus::Closed | SessionStatus::Reloaded | SessionStatus::Compacted) => {
             WorkspaceSessionVisualState::Completed
         }
-        Ok(SessionStatus::RateLimited) => WorkspaceSessionVisualState::Waiting,
+        Ok(SessionStatus::RateLimited | SessionStatus::AwaitingUser) => {
+            WorkspaceSessionVisualState::Waiting
+        }
         Ok(SessionStatus::Error { .. } | SessionStatus::Crashed { .. }) => {
             WorkspaceSessionVisualState::Error
         }
