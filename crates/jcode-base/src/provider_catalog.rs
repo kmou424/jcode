@@ -1440,6 +1440,73 @@ pub fn named_provider_model_context_window(profile_name: &str, model_id: &str) -
         })
 }
 
+/// Look up the configured `experimentals` tags for a model on a named provider
+/// profile (`[providers.<profile>]` `[[models]]` entry). An absent profile or
+/// model entry resolves to an empty list.
+pub fn named_provider_model_experimentals(profile_name: &str, model_id: &str) -> Vec<String> {
+    let model_id = model_id.trim();
+    if profile_name.trim().is_empty() || model_id.is_empty() {
+        return Vec::new();
+    }
+    crate::config::config()
+        .providers
+        .get(profile_name.trim())
+        .and_then(|profile| {
+            profile
+                .models
+                .iter()
+                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+                .map(|model| model.experimentals.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// `experimentals` lookup for the *active* named provider profile
+/// (`JCODE_NAMED_PROVIDER_PROFILE`), mirroring
+/// [`active_named_provider_model_display_name`].
+pub fn active_named_provider_model_experimentals(model_id: &str) -> Vec<String> {
+    let Some(profile) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").ok())
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    named_provider_model_experimentals(&profile, model_id)
+}
+
+/// `experimentals` lookup resolving the profile from a persisted runtime
+/// *provider key*, mirroring
+/// [`named_provider_model_display_name_for_provider_key`]. The session's
+/// `openai-compatible:<profile>` key (or a bare profile name) is tried before
+/// the env-based active-profile fallback.
+pub fn named_provider_model_experimentals_for_provider_key(
+    provider_key: Option<&str>,
+    model_id: &str,
+) -> Vec<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return Vec::new();
+    }
+    if let Some(key) = provider_key.map(str::trim).filter(|key| !key.is_empty()) {
+        // Try the key as-is (bare profile name), then a `kind:<profile>`
+        // runtime-key suffix ("openai-compatible:deepseek" -> "deepseek").
+        let suffix = key
+            .split_once(':')
+            .map(|(_, profile)| profile.trim())
+            .filter(|profile| !profile.is_empty());
+        for candidate in [Some(key), suffix].into_iter().flatten() {
+            let tags = named_provider_model_experimentals(candidate, model_id);
+            if !tags.is_empty() {
+                return tags;
+            }
+        }
+    }
+    active_named_provider_model_experimentals(model_id)
+}
+
 /// Display labels learned from a remote server's model catalog. Remote TUI
 /// clients cannot see the server's `[providers.*]` config; when a catalog
 /// snapshot arrives, the routes' `display_name` values are registered here so

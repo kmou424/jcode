@@ -422,6 +422,18 @@ impl Agent {
             self.registry.register_selfdev_tools().await;
         }
 
+        // Experimentals-gated tools follow the active model: reconcile the
+        // live tool map before consulting the locked snapshot so a model
+        // switch surfaces on the next request (one intentional cache miss,
+        // same trade as the late-MCP rebuild).
+        if self
+            .registry
+            .apply_experimentals(&self.active_experimentals())
+            .await
+        {
+            self.unlock_tools();
+        }
+
         // Account sign-in/out and verified entitlement changes must reach the
         // model even when the tool list is frozen (including deferred MCP).
         // Only update this definition when its guidance actually changes.
@@ -511,9 +523,23 @@ impl Agent {
         tools
     }
 
+    /// `experimentals` tags configured on the active model's named-provider
+    /// entry. Non-named routes resolve to an empty set.
+    fn active_experimentals(&self) -> HashSet<String> {
+        crate::experimentals::tags_for_model(
+            self.session.provider_key.as_deref(),
+            &self.provider.model(),
+        )
+    }
+
     /// Build the agent's tool definitions from the registry, applying the
     /// session's `allowed_tools`, `disabled_tools`, and self-dev filters.
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
+        // Prewarm/debug paths reach the registry without `tool_definitions`'s
+        // sync step; `apply_experimentals` is idempotent on a converged map.
+        self.registry
+            .apply_experimentals(&self.active_experimentals())
+            .await;
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.disabled_tools.is_empty() {
             tools.retain(|tool| {

@@ -2307,6 +2307,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            experimentals: Vec::new(),
         }],
         ..Default::default()
     };
@@ -2337,6 +2338,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
+            experimentals: Vec::new(),
         }],
         ..Default::default()
     };

@@ -1,6 +1,6 @@
 mod agentgrep;
 pub mod ambient;
-mod apply_patch;
+pub(crate) mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
@@ -530,6 +530,14 @@ impl Registry {
             start.elapsed().as_millis()
         ));
         registry
+    }
+
+    /// Reconcile the session's live tool map with the active model's
+    /// `experimentals` tags. Idempotent; returns whether the map changed so
+    /// callers can invalidate cached tool-definition snapshots.
+    pub async fn apply_experimentals(&self, tags: &HashSet<String>) -> bool {
+        let mut tools = self.tools.write().await;
+        crate::experimentals::apply(&mut tools, tags)
     }
 
     /// Get all tool definitions for the API

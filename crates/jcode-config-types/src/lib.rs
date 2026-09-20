@@ -502,6 +502,11 @@ pub struct NamedProviderModelConfig {
     pub context_window: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<String>,
+    /// Experimental feature tags enabled for this model (e.g.
+    /// `experimentals = ["tool_apply_patch"]`). Unknown tags are ignored with a
+    /// warning so newer configs stay loadable on older builds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub experimentals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
