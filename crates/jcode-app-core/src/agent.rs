@@ -1115,10 +1115,10 @@ impl Agent {
                         md.push_str(text);
                         md.push_str("\n\n");
                     }
-                    ContentBlock::Reasoning { text } => {
+                    ContentBlock::Reasoning { text, .. } => {
                         md.push_str(&format!("*Thinking:* {}\n\n", text));
                     }
-                    ContentBlock::ReasoningTrace { text } => {
+                    ContentBlock::ReasoningTrace { text, .. } => {
                         md.push_str(&format!("*Thinking:* {}\n\n", text));
                     }
                     ContentBlock::AnthropicThinking { thinking, .. } => {

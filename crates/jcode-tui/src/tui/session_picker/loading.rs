@@ -789,6 +789,7 @@ fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: 
         tool_calls: Vec::new(),
         tool_data: None,
         timestamp: None,
+        duration_secs: None,
     });
     if preview.len() > 20 {
         let drop_count = preview.len().saturating_sub(20);
@@ -1623,6 +1624,7 @@ pub(super) fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
             tool_calls: msg.tool_calls,
             tool_data: msg.tool_data,
             timestamp: None,
+            duration_secs: msg.duration_secs,
         })
         .collect()
 }

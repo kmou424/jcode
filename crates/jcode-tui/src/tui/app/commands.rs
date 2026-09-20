@@ -2033,7 +2033,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 role: rendered.role,
                 content: rendered.content,
                 tool_calls: rendered.tool_calls,
-                duration_secs: None,
+                duration_secs: rendered.duration_secs.map(|secs| secs as f32),
                 title: None,
                 tool_data: rendered.tool_data,
             });
@@ -2114,7 +2114,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         role: rendered.role,
                         content: rendered.content,
                         tool_calls: rendered.tool_calls,
-                        duration_secs: None,
+                        duration_secs: rendered.duration_secs.map(|secs| secs as f32),
                         title: None,
                         tool_data: rendered.tool_data,
                     });

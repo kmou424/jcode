@@ -878,6 +878,7 @@ mod tests {
             content: vec![
                 ContentBlock::Reasoning {
                     text: "secret reasoning".to_string(),
+                    duration_secs: None,
                 },
                 ContentBlock::Text {
                     text: "visible".to_string(),

@@ -408,6 +408,7 @@ mod history_dedup_tests {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            duration_secs: None,
         }
     }
 
@@ -665,14 +666,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             app.resume_streaming_tps();
-            // The server always streams reasoning; whether to *render* it is
-            // this client's choice (mirroring the local-turn path, which gates
-            // on the same config). Hidden reasoning still drives the status
-            // line and stall-guard activity above.
-            if crate::config::config().display.reasoning_enabled() {
-                let ops = app.stream_buffer.push_reasoning(&text);
-                app.apply_stream_ops(ops);
-            }
+            // The server always streams reasoning; the client always captures it
+            // as display data (off mode accumulates a hidden block so a later
+            // mode toggle can reveal it). *Rendering* is decided at render time
+            // by `render_reasoning_message` off the live `reasoning_display` mode.
+            // Hidden reasoning still drives the status line and stall-guard
+            // activity above.
+            let ops = app.stream_buffer.push_reasoning(&text);
+            app.apply_stream_ops(ops);
             app.last_stream_activity = Some(Instant::now());
             eager_stream_redraw
         }
@@ -1056,6 +1057,12 @@ pub(in crate::tui::app) fn handle_server_event(
             let recovered_local = recover_local_interleave_to_queue(app, "interrupt");
             let ops = app.stream_buffer.flush();
             app.apply_stream_ops(ops);
+            // Close an open reasoning region first so its block anchors as a
+            // `reasoning` row ahead of the committed text (hidden `off`-mode
+            // blocks anchor even when the stream text is empty).
+            if app.reasoning_streaming {
+                app.close_reasoning_region(None);
+            }
             if !app.streaming.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
                 let content = app.collapse_reasoning_for_commit(content);
@@ -1932,7 +1939,7 @@ pub(in crate::tui::app) fn handle_server_event(
                                 role: msg.role,
                                 content: msg.content,
                                 tool_calls: msg.tool_calls.unwrap_or_default(),
-                                duration_secs: None,
+                                duration_secs: msg.duration_secs.map(|secs| secs as f32),
                                 title: None,
                                 tool_data: msg.tool_data,
                             })
@@ -2140,7 +2147,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     role: msg.role,
                     content: msg.content,
                     tool_calls: msg.tool_calls.unwrap_or_default(),
-                    duration_secs: None,
+                    duration_secs: msg.duration_secs.map(|secs| secs as f32),
                     title: None,
                     tool_data: msg.tool_data,
                 })
@@ -2525,6 +2532,9 @@ pub(in crate::tui::app) fn handle_server_event(
             ));
             let ops = app.stream_buffer.flush();
             app.apply_stream_ops(ops);
+            if app.reasoning_streaming {
+                app.close_reasoning_region(None);
+            }
             if !app.streaming.streaming_text.is_empty() {
                 let duration = app.display_turn_duration_secs();
                 let flushed = app.take_streaming_text();

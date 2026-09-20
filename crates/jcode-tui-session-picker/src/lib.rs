@@ -170,6 +170,12 @@ pub struct PreviewMessage {
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
     pub timestamp: Option<DateTime<Utc>>,
+    /// Wall-clock thinking time (seconds) on `role="reasoning"` rows.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub duration_secs: Option<f64>,
 }
 
 /// An item in the picker list, either a server/header row or a session row.

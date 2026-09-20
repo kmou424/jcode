@@ -41,7 +41,7 @@ pub(super) fn floor_char_boundary(text: &str, index: usize) -> usize {
 /// are wrapped in emphasis containing the invisible [`REASONING_SENTINEL`]
 /// (see `jcode_tui_markdown::reasoning_line_markup`). Trailing blank lines left
 /// behind are trimmed so the remaining answer renders cleanly.
-pub(super) fn strip_reasoning_lines(content: &str) -> String {
+pub(crate) fn strip_reasoning_lines(content: &str) -> String {
     let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
     let mut out_lines: Vec<&str> = Vec::new();
     for line in content.split('\n') {
@@ -3454,13 +3454,16 @@ impl App {
         }
     }
 
-    /// Garbage-collect *stale* reasoning traces (every anchored trace except
-    /// the most recent one) that are provably above the tail-following
-    /// viewport, so their removal causes zero visible motion. Keeps `current`
-    /// mode meaning "the current thought": old thoughts dissolve once they
-    /// scroll out of view instead of accumulating across a long agentic turn.
-    /// Skipped entirely while the user has scrolled up (their reading position
-    /// must not shift).
+    /// Drop the live-turn membership of *stale* reasoning traces (every
+    /// anchored trace except the most recent one) that are provably above the
+    /// tail-following viewport, so the change causes zero visible motion.
+    /// Keeps `current` mode meaning "the current thought": old thoughts
+    /// dissolve once they scroll out of view instead of accumulating across a
+    /// long agentic turn. The reasoning *rows* are never removed — they carry
+    /// the data `full`/`compact` render — only their live-turn membership is
+    /// released, which hides them under `current` exactly like the old
+    /// physical removal did. Skipped entirely while the user has scrolled up
+    /// (their reading position must not shift).
     pub(super) fn gc_offscreen_reasoning_traces(&mut self) -> bool {
         // Only the traces *before* the most recent one are stale.
         if self.turn_reasoning_traces.len() < 2 {
@@ -3483,49 +3486,22 @@ impl App {
         // grown a full viewport past the anchor point (with margin for the
         // separator blank line), the trace cannot be on screen.
         let last = self.turn_reasoning_traces.len() - 1;
-        let stale: Vec<usize> = self.turn_reasoning_traces[..last]
-            .iter()
-            .filter(|t| total.saturating_sub(t.wrapped_lines_at_anchor) > viewport + 2)
-            .map(|t| t.display_index)
-            .collect();
-        if stale.is_empty() {
+        let before = self.turn_reasoning_traces.len();
+        let mut idx = 0usize;
+        self.turn_reasoning_traces.retain(|t| {
+            let keep =
+                idx == last || total.saturating_sub(t.wrapped_lines_at_anchor) <= viewport + 2;
+            idx += 1;
+            keep
+        });
+        if self.turn_reasoning_traces.len() == before {
             return false;
         }
-        let removed = self.remove_reasoning_trace_messages(stale.iter().copied());
-        if removed > 0 {
-            // Re-track surviving traces with adjusted display indices.
-            self.turn_reasoning_traces.retain_mut(|t| {
-                if stale.contains(&t.display_index) {
-                    return false;
-                }
-                let shift = stale.iter().filter(|&&s| s < t.display_index).count();
-                t.display_index -= shift;
-                true
-            });
-            self.bump_display_messages_version();
-            self.refresh_split_view_if_needed();
-            return true;
-        }
-        false
-    }
-
-    /// Remove reasoning display messages at the given (pre-removal) indices.
-    /// Returns how many were removed.
-    pub(super) fn remove_reasoning_trace_messages(
-        &mut self,
-        indices: impl Iterator<Item = usize>,
-    ) -> usize {
-        let mut sorted: Vec<usize> = indices.collect();
-        sorted.sort_unstable();
-        let mut removed = 0usize;
-        for idx in sorted {
-            let idx = idx.saturating_sub(removed);
-            if idx < self.display_messages.len() && self.display_messages[idx].role == "reasoning" {
-                self.display_messages.remove(idx);
-                removed += 1;
-            }
-        }
-        removed
+        // Dropped rows become historical: under `current` mode they stop
+        // rendering, so the prepared transcript changes with no removal.
+        self.bump_display_messages_version();
+        self.refresh_split_view_if_needed();
+        true
     }
 
     pub(super) fn append_streaming_text(&mut self, text: &str) {
@@ -3599,19 +3575,14 @@ impl App {
         changed
     }
 
-    /// In `current` and `compact` reasoning display modes, reasoning is shown
-    /// live but collapsed once the assistant commits a message or runs a tool.
-    /// Strip any reasoning-marked lines (identified by [`REASONING_SENTINEL`])
-    /// from text about to be committed to the transcript. Other modes pass
-    /// through.
+    /// Reasoning blocks are always sliced out of the live stream when they
+    /// close and anchored as their own `reasoning` messages, so committed
+    /// answer text normally carries no sentinel markup. Strip any leftover
+    /// reasoning-marked lines (identified by [`REASONING_SENTINEL`]) anyway —
+    /// mid-block toggles, reconnect snapshots, or a region closed by
+    /// `take_streaming_text` without `close_reasoning_region` can still leave
+    /// stragglers in the buffer.
     pub(super) fn collapse_reasoning_for_commit(&self, content: String) -> String {
-        if !matches!(
-            crate::config::config().display.reasoning_display(),
-            crate::config::ReasoningDisplayMode::Current
-                | crate::config::ReasoningDisplayMode::Compact
-        ) {
-            return content;
-        }
         strip_reasoning_lines(&content)
     }
 
@@ -3625,6 +3596,7 @@ impl App {
         self.reasoning_pending_line.clear();
         self.reasoning_streaming = false;
         self.reasoning_block_start = None;
+        self.reasoning_hidden_block.clear();
         self.refresh_split_view_if_needed();
     }
 
@@ -3637,6 +3609,7 @@ impl App {
         self.reasoning_partial_len = 0;
         // The stream (and any block offset into it) is gone.
         self.reasoning_block_start = None;
+        self.reasoning_hidden_block.clear();
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
@@ -3673,18 +3646,20 @@ impl App {
         self.thinking_prefix_emitted = false;
         self.thinking_buffer.clear();
         self.thinking_start = None;
-        // Assistant text committed to the transcript during this attempt (a
-        // ToolStart boundary commits the pending streamed text) must also go;
-        // the retry re-streams the entire response. `push_display_message`
-        // counts the trailing run of assistant messages and resets on any
-        // user/tool/system fence, so this removes exactly the current
-        // attempt's committed segments and never touches earlier turns.
+        // Assistant text and reasoning rows committed to the transcript
+        // during this attempt (a ToolStart boundary commits the pending
+        // streamed text; a closed reasoning region anchors its row) must also
+        // go; the retry re-streams the entire response.
+        // `push_display_message` counts the trailing run of assistant+reasoning
+        // messages and resets on any user/tool/system fence, so this removes
+        // exactly the current attempt's committed segments and never touches
+        // earlier turns.
         let to_remove = self.attempt_committed_assistant_messages;
         for _ in 0..to_remove {
             if self
                 .display_messages
                 .last()
-                .is_some_and(|m| m.role == "assistant")
+                .is_some_and(|m| m.role == "assistant" || m.role == "reasoning")
             {
                 let idx = self.display_messages.len() - 1;
                 self.remove_display_message(idx);
@@ -3693,9 +3668,22 @@ impl App {
             }
         }
         self.attempt_committed_assistant_messages = 0;
+        // Rollback truncated from the tail, so any live-turn trace records that
+        // pointed at the removed rows are gone too.
+        self.turn_reasoning_traces
+            .retain(|t| t.display_index < self.display_messages.len());
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
+        // A still-open reasoning region would otherwise dump its sentinel
+        // markup into the committed text (or lose the block entirely under
+        // `off`). Close it first so it anchors as a `reasoning` row ahead of
+        // whatever this commit produces. `close_reasoning_region` clears the
+        // flag before it may re-enter this function to commit preceding text,
+        // so the recursion is bounded to one level.
+        if self.reasoning_streaming {
+            self.close_reasoning_region(None);
+        }
         let content = std::mem::take(&mut self.streaming.streaming_text);
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
@@ -3703,6 +3691,7 @@ impl App {
         self.reasoning_pending_line.clear();
         self.reasoning_partial_len = 0;
         self.reasoning_block_start = None;
+        self.reasoning_hidden_block.clear();
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();

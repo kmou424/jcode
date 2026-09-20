@@ -95,8 +95,7 @@ impl App {
         else {
             return false;
         };
-        self.display_messages.remove(idx);
-        self.bump_display_messages_version();
+        self.remove_display_message(idx);
         true
     }
 

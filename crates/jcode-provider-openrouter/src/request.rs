@@ -196,7 +196,7 @@ pub fn build_chat_messages(
                         ContentBlock::Text { text, .. } => {
                             text_content.push_str(text);
                         }
-                        ContentBlock::Reasoning { text } => {
+                        ContentBlock::Reasoning { text, .. } => {
                             reasoning_content.push_str(text);
                         }
                         ContentBlock::ToolUse {

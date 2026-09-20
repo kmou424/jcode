@@ -624,6 +624,12 @@ impl crate::tui::TuiState for App {
         self.display_messages_version
     }
 
+    fn reasoning_row_is_live(&self, display_index: usize) -> bool {
+        self.turn_reasoning_traces
+            .iter()
+            .any(|t| t.display_index == display_index)
+    }
+
     fn streaming_text(&self) -> &str {
         &self.streaming.streaming_text
     }
@@ -1216,8 +1222,8 @@ impl crate::tui::TuiState for App {
                             tool_result_count += 1;
                             tool_result_chars += content.len();
                         }
-                        ContentBlock::Reasoning { text }
-                        | ContentBlock::ReasoningTrace { text } => {
+                        ContentBlock::Reasoning { text, .. }
+                        | ContentBlock::ReasoningTrace { text, .. } => {
                             asst_chars += text.len();
                         }
                         ContentBlock::AnthropicThinking {

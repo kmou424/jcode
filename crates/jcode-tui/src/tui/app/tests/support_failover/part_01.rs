@@ -473,6 +473,28 @@ fn with_reasoning_compact_home<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
+/// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
+/// `full` (every captured block renders verbatim, historical rows included).
+fn with_reasoning_full_home<T>(f: impl FnOnce() -> T) -> T {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Full)
+            .expect("pin reasoning display to full for the test config");
+        crate::config::invalidate_config_cache();
+        f()
+    })
+}
+
+/// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
+/// `off` (nothing renders live; blocks still capture into reasoning rows).
+fn with_reasoning_off_home<T>(f: impl FnOnce() -> T) -> T {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Off)
+            .expect("pin reasoning display to off for the test config");
+        crate::config::invalidate_config_cache();
+        f()
+    })
+}
+
 fn create_jcode_repo_fixture() -> tempfile::TempDir {
     let temp = tempfile::TempDir::new().expect("temp repo");
     std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");

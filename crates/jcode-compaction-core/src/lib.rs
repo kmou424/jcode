@@ -299,8 +299,8 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
         .iter()
         .map(|block| match block {
             ContentBlock::Text { text, .. } => text.len(),
-            ContentBlock::Reasoning { text } => text.len(),
-            ContentBlock::ReasoningTrace { text } => text.len(),
+            ContentBlock::Reasoning { text, .. } => text.len(),
+            ContentBlock::ReasoningTrace { text, .. } => text.len(),
             ContentBlock::AnthropicThinking {
                 thinking,
                 signature,

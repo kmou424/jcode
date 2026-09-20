@@ -1677,4 +1677,7 @@ pub struct SessionPreviewMessage {
     pub tool_calls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Wall-clock thinking time (seconds) on `role="reasoning"` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
 }

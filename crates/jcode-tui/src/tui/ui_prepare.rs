@@ -1400,6 +1400,23 @@ fn render_message_into(
     }
     let align = default_message_alignment(role, centered);
 
+    // Reasoning rows carry their data unconditionally; the *current*
+    // `reasoning_display` mode decides whether this row emits anything at all:
+    // `off` hides every reasoning row, `current` hides rows whose turn is over
+    // (no longer registered in `turn_reasoning_traces`). Returning before the
+    // separator blank keeps hidden rows from leaving stray spacing behind.
+    if role == "reasoning" {
+        match crate::tui::ui::reasoning_display_mode() {
+            crate::config::ReasoningDisplayMode::Off => return,
+            crate::config::ReasoningDisplayMode::Current
+                if !ctx.app.reasoning_row_is_live(msg_global_idx) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if (acc.body_has_content || !acc.lines.is_empty())
         && role != "tool"
         && role != "meta"
