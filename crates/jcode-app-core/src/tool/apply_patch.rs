@@ -126,7 +126,7 @@ impl Tool for ApplyPatchTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ApplyPatchInput = serde_json::from_value(input)?;
-        apply_patch_text(&params.patch_text, params.intent.as_deref(), &ctx).await
+        apply_patch_text(&params.patch_text, params.intent.as_deref(), &ctx, false).await
     }
 }
 
@@ -165,7 +165,12 @@ impl Tool for ApplyPatchFreeformTool {
             .input
             .or(params.patch_text)
             .ok_or_else(|| anyhow::anyhow!("missing patch text: expected 'input' string"))?;
-        apply_patch_text(&patch_text, params.intent.as_deref(), &ctx).await
+        // GPT models trained on codex's apply_patch expect its exact result
+        // text: `Success. Updated the following files:` + A/M/D path lines,
+        // no per-file hunks, no diff block. Detect by session model id.
+        let codex_style = crate::session_model::session_model(&ctx.session_id)
+            .is_some_and(|model| model.model.to_ascii_lowercase().contains("gpt"));
+        apply_patch_text(&patch_text, params.intent.as_deref(), &ctx, codex_style).await
     }
 }
 
@@ -173,6 +178,7 @@ async fn apply_patch_text(
     patch_text: &str,
     intent: Option<&str>,
     ctx: &ToolContext,
+    codex_style: bool,
 ) -> Result<ToolOutput> {
     let hunks = parse_apply_patch(patch_text)?;
 
@@ -200,6 +206,12 @@ async fn apply_patch_text(
 
     let mut results = Vec::new();
     let mut touched_paths = Vec::new();
+    // Codex-style summary bookkeeping: per-path A/M/D groups plus plain
+    // failure lines (codex reports failures as errors, never `✗`).
+    let mut added_paths: Vec<String> = Vec::new();
+    let mut modified_paths: Vec<String> = Vec::new();
+    let mut deleted_paths: Vec<String> = Vec::new();
+    let mut failure_lines: Vec<String> = Vec::new();
 
     for hunk in &hunks {
         match hunk {
@@ -226,6 +238,7 @@ async fn apply_patch_text(
                 } else {
                     results.push(format!("✓ {}: created\n{}", path, diff));
                 }
+                added_paths.push(path.clone());
             }
             PatchHunk::DeleteFile { path } => {
                 let resolved = ctx.resolve_path(Path::new(path));
@@ -236,6 +249,11 @@ async fn apply_patch_text(
                 // are this tool's normal job.
                 let risk_ctx = jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
                 if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                    failure_lines.push(format!(
+                        "{}: refused, this path is protected and must never \
+                             be deleted by an agent",
+                        path
+                    ));
                     results.push(format!(
                         "✗ {}: refused, this path is protected and must never \
                              be deleted by an agent",
@@ -255,7 +273,9 @@ async fn apply_patch_text(
                     } else {
                         results.push(format!("✓ {}: deleted\n{}", path, diff));
                     }
+                    deleted_paths.push(path.clone());
                 } else {
+                    failure_lines.push(format!("{}: failed to delete", path));
                     results.push(format!("✗ {}: failed to delete", path));
                 }
             }
@@ -350,8 +370,12 @@ async fn apply_patch_text(
                                 ));
                             }
                         }
+                        // Codex classifies a move as `M <source>` — the
+                        // source path is pushed for both branches.
+                        modified_paths.push(path.clone());
                     }
                     Err(e) => {
+                        failure_lines.push(format!("{}: {}", path, e));
                         results.push(format!("✗ {}: {}", path, e));
                     }
                 }
@@ -362,8 +386,42 @@ async fn apply_patch_text(
     if results.is_empty() {
         Ok(ToolOutput::new("No changes applied"))
     } else {
-        let mut body = results.join("\n");
+        let mut body = if codex_style {
+            // Codex's apply_patch prints a git-style summary only:
+            // `Success. Updated the following files:` then one `A`/`M`/`D`
+            // line per affected path (moves count as `M` on the source
+            // path). Failures surface as plain error lines; the per-file
+            // ✓/✗ lines, hunk counts and the unified `File diff:` block
+            // are dropped entirely.
+            let mut lines = Vec::new();
+            if !added_paths.is_empty() || !modified_paths.is_empty() || !deleted_paths.is_empty() {
+                lines.push("Success. Updated the following files:".to_string());
+                for path in &added_paths {
+                    lines.push(format!("A {path}"));
+                }
+                for path in &modified_paths {
+                    lines.push(format!("M {path}"));
+                }
+                for path in &deleted_paths {
+                    lines.push(format!("D {path}"));
+                }
+            }
+            for failure in &failure_lines {
+                lines.push(format!("error: {failure}"));
+            }
+            lines.join("\n")
+        } else {
+            results.join("\n")
+        };
         config_watch.finish(&mut body);
+        if codex_style {
+            let output = ToolOutput::new(body);
+            return Ok(if touched_paths.len() == 1 {
+                output.with_title(touched_paths[0].clone())
+            } else {
+                output.with_title(format!("{} files", touched_paths.len()))
+            });
+        }
         let mut unified = String::new();
         let mut after = std::collections::BTreeMap::new();
         for path in before.keys() {

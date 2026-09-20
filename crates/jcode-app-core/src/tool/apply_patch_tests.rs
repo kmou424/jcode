@@ -431,3 +431,97 @@ async fn freeform_tool_reports_missing_patch_text() {
         .expect_err("missing input must error");
     assert!(err.to_string().contains("input"), "{err}");
 }
+
+#[tokio::test]
+async fn freeform_tool_prints_codex_summary_for_gpt_models() {
+    // Codex's apply_patch ends with `Success. Updated the following
+    // files:` plus one `A`/`M`/`D` line per path — no per-hunk lines, no
+    // `File diff:` block. GPT-family sessions get that text verbatim so
+    // the model sees the response it was trained on.
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::fs::write(temp.path().join("mod.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(temp.path().join("del.txt"), "gone\n").unwrap();
+
+    let session = "patch-codex-summary";
+    crate::session_model::record_session_model(session, None, "GPT-5.4-Codex");
+    let patch = "*** Begin Patch\n*** Add File: add.txt\n+new\n*** Update File: \
+                 mod.txt\n@@\n-alpha\n+ALPHA\n*** Delete File: del.txt\n*** End Patch";
+    let output = ApplyPatchFreeformTool::new()
+        .execute(
+            serde_json::json!({ "input": patch }),
+            ToolContext {
+                session_id: session.to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(temp.path().to_path_buf()),
+                stdin_request_tx: None,
+                ask_user_question_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("patch should apply");
+    crate::session_model::forget_session_model(session);
+
+    assert_eq!(
+        output.output,
+        "Success. Updated the following files:\nA add.txt\nM mod.txt\nD del.txt"
+    );
+}
+
+#[tokio::test]
+async fn non_gpt_freeform_and_compat_keep_legacy_summary() {
+    // The byte-identical guarantee: a non-GPT freeform session and the
+    // compat variant (even under a GPT session) both keep the ✓ lines
+    // and the `File diff:` block.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let patch = "*** Begin Patch\n*** Add File: add.txt\n+new\n*** End Patch";
+
+    let ctx = |session: &str| ToolContext {
+        session_id: session.to_string(),
+        message_id: "m".to_string(),
+        tool_call_id: "c".to_string(),
+        working_dir: Some(temp.path().to_path_buf()),
+        stdin_request_tx: None,
+        ask_user_question_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+
+    crate::session_model::record_session_model("patch-legacy-model", None, "swe-2");
+    let freeform = ApplyPatchFreeformTool::new()
+        .execute(
+            serde_json::json!({ "input": patch }),
+            ctx("patch-legacy-model"),
+        )
+        .await
+        .expect("freeform patch should apply");
+    crate::session_model::forget_session_model("patch-legacy-model");
+    assert!(
+        freeform.output.contains("✓ add.txt: created"),
+        "non-GPT sessions keep the legacy summary: {}",
+        freeform.output
+    );
+    assert!(
+        freeform.output.contains("File diff:"),
+        "non-GPT sessions keep the diff block"
+    );
+
+    // Same model id check never runs on the compat variant at all.
+    std::fs::remove_file(temp.path().join("add.txt")).unwrap();
+    crate::session_model::record_session_model("patch-compat-gpt", None, "gpt-5.4");
+    let compat = ApplyPatchTool
+        .execute(
+            serde_json::json!({ "patch_text": patch }),
+            ctx("patch-compat-gpt"),
+        )
+        .await
+        .expect("compat patch should apply");
+    crate::session_model::forget_session_model("patch-compat-gpt");
+    assert!(
+        compat.output.contains("✓ add.txt: created"),
+        "the compat variant keeps the legacy summary even for GPT models: {}",
+        compat.output
+    );
+}
