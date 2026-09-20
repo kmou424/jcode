@@ -144,6 +144,7 @@ pub(crate) use messages::{
     render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
+use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -152,7 +153,6 @@ pub(crate) use pinned_ui::{
     clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
     reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
 };
-use pinned_ui::draw_side_panel_markdown;
 #[cfg(test)]
 use transitions::extract_line_text;
 #[cfg(test)]
