@@ -17,7 +17,7 @@ mod debug_socket;
 mod desktop_selfdev;
 mod discover;
 mod discover_secrets;
-mod edit;
+pub(crate) mod edit;
 mod edit_stats;
 mod feedback;
 mod file_diff;
@@ -35,7 +35,7 @@ pub mod mcp;
 mod memory;
 mod open;
 mod panel;
-mod patch;
+pub(crate) mod patch;
 mod read;
 mod replace;
 pub(crate) mod sdk;
@@ -48,7 +48,7 @@ mod skill;
 mod todo;
 mod webfetch;
 mod websearch;
-mod write;
+pub(crate) mod write;
 
 use crate::compaction::CompactionManager;
 use crate::provider::Provider;
@@ -116,6 +116,7 @@ impl Drop for SessionToolPolicyRegistration {
         {
             policies.remove(&self.session_id);
             sdk::remove_session(&self.session_id);
+            crate::experimentals::remove_session(&self.session_id);
         }
     }
 }
@@ -552,9 +553,11 @@ impl Registry {
     /// Reconcile the session's live tool map with the active model's
     /// `experimentals` tags. Idempotent; returns whether the map changed so
     /// callers can invalidate cached tool-definition snapshots.
-    pub async fn apply_experimentals(&self, tags: &HashSet<String>) -> bool {
+    pub async fn apply_experimentals(&self, session_id: &str, tags: &HashSet<String>) -> bool {
         let mut tools = self.tools.write().await;
-        crate::experimentals::apply(&mut tools, tags)
+        let changed = crate::experimentals::apply(&mut tools, tags);
+        crate::experimentals::note_edit_surface(session_id, &tools);
+        changed
     }
 
     /// Get all tool definitions for the API

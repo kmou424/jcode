@@ -376,6 +376,14 @@ async fn apply_auth_route_to_agent(
     }
 }
 
+fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
+    if agent.available_models_for_switching().is_empty() {
+        Some(agent.provider_model())
+    } else {
+        None
+    }
+}
+
 fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(
@@ -599,6 +607,7 @@ fn apply_set_model(
             available_efforts: agent.provider_available_efforts_wire(),
             model: current,
             provider_name: None,
+            reasoning_effort: agent.provider_reasoning_effort(),
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
         });
@@ -658,6 +667,7 @@ fn apply_set_route(
             available_efforts: agent.provider_available_efforts_wire(),
             model: current,
             provider_name: None,
+            reasoning_effort: agent.provider_reasoning_effort(),
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
         });

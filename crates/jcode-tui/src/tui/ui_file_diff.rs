@@ -184,12 +184,7 @@ fn diff_lines_for_message(msg: Option<&DisplayMessage>) -> Vec<ParsedDiffLine> {
         return Vec::new();
     };
 
-    let from_content = collect_diff_lines(&msg.content);
-    if !from_content.is_empty() {
-        from_content
-    } else {
-        generate_diff_lines_from_tool_input(tc)
-    }
+    crate::tui::ui_diff::diff_lines_for_tool_message(tc, &msg.content)
 }
 
 fn build_file_diff_cache_entry(
@@ -229,6 +224,17 @@ fn build_file_diff_cache_entry(
                 DiffLineKind::Add => {
                     current_adds.push(dl.content.clone());
                 }
+                DiffLineKind::Sep => {
+                    // A hunk boundary flushes the pending del/add pair so the
+                    // side-by-side view keeps hunks separate.
+                    if !current_dels.is_empty() || !current_adds.is_empty() {
+                        hunks.push(DiffHunk {
+                            dels: std::mem::take(&mut current_dels),
+                            adds: std::mem::take(&mut current_adds),
+                        });
+                    }
+                }
+                DiffLineKind::Error => {}
             }
         }
         if !current_dels.is_empty() || !current_adds.is_empty() {

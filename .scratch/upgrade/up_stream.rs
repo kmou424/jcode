@@ -247,10 +247,6 @@ pub struct StreamingToolCallState {
     emitted_arguments: usize,
     complete: bool,
     order: usize,
-    /// True for Responses `custom_tool_call` items (freeform tools): `input`
-    /// carries raw text rather than JSON, so the payload is buffered and
-    /// delivered once, wrapped into a JSON object.
-    is_custom: bool,
 }
 
 fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
@@ -331,9 +327,6 @@ fn update_tool_call_from_item(
     item: &Value,
     complete: bool,
 ) -> bool {
-    if item.get("type").and_then(Value::as_str) == Some("custom_tool_call") {
-        state.is_custom = true;
-    }
     if let Some(id) = item
         .get("call_id")
         .and_then(Value::as_str)
@@ -407,24 +400,11 @@ fn stream_tool_calls(
             state.started = true;
         }
         if state.complete {
-            if state.is_custom {
-                // Custom (freeform) tools receive raw text, not JSON. Deliver
-                // the accumulated payload once, wrapped so the downstream
-                // ToolCall input stays a JSON object.
-                let raw = std::mem::take(&mut state.arguments);
-                state.arguments = serde_json::json!({ "input": raw }).to_string();
-            } else {
-                state.arguments =
-                    normalize_openai_tool_arguments(std::mem::take(&mut state.arguments));
-            }
+            state.arguments = normalize_openai_tool_arguments(std::mem::take(&mut state.arguments));
         }
         // Hold only a possible empty/null value until it can be normalized.
         // Ordinary JSON fragments flow through without waiting for valid JSON.
-        // Custom calls buffer raw text that cannot be wrapped into valid JSON
-        // incrementally, so they emit only once complete.
-        if !(state.is_custom && !state.complete)
-            && (state.complete || !"null".starts_with(state.arguments.trim()))
-        {
+        if state.complete || !"null".starts_with(state.arguments.trim()) {
             let delta = &state.arguments[state.emitted_arguments..];
             if !delta.is_empty() {
                 pending.push_back(StreamEvent::ToolInputDeltaFor {
@@ -539,9 +519,6 @@ pub fn parse_openai_response_event(
                 event.item_id.as_deref(),
                 event.call_id.as_deref(),
             )?;
-            if event.kind == "response.custom_tool_call_input.delta" {
-                state.is_custom = true;
-            }
             if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
                 state.call_id = Some(call_id);
             }
@@ -561,9 +538,6 @@ pub fn parse_openai_response_event(
                 event.item_id.as_deref(),
                 event.call_id.as_deref(),
             )?;
-            if event.kind == "response.custom_tool_call_input.done" {
-                state.is_custom = true;
-            }
             if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
                 state.call_id = Some(call_id);
             }
@@ -738,13 +712,7 @@ pub fn handle_openai_output_item(
                     })
                 })
                 .unwrap_or_else(|| "{}".to_string());
-            let arguments = if item_type == "custom_tool_call" {
-                // Freeform tools emit raw text input; wrap it so the
-                // downstream ToolCall input stays a JSON object.
-                serde_json::json!({ "input": raw_arguments }).to_string()
-            } else {
-                normalize_openai_tool_arguments(raw_arguments)
-            };
+            let arguments = normalize_openai_tool_arguments(raw_arguments);
 
             pending.push_back(StreamEvent::ToolUseStart {
                 id: call_id.clone(),

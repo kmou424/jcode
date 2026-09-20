@@ -328,3 +328,101 @@ async fn apply_patch_still_deletes_ordinary_files() {
 
     assert!(!target.exists(), "an ordinary file should still be deleted");
 }
+
+#[test]
+fn freeform_tool_declares_the_lark_grammar_marker() {
+    let def = ApplyPatchFreeformTool::new().to_definition();
+    assert_eq!(def.name, "apply_patch");
+    let format = def
+        .freeform_format()
+        .expect("freeform variant must declare a grammar format");
+    assert_eq!(format["type"], serde_json::json!("grammar"));
+    assert_eq!(format["syntax"], serde_json::json!("lark"));
+    assert!(
+        format["definition"]
+            .as_str()
+            .is_some_and(|grammar| grammar.contains("*** Begin Patch")),
+        "grammar must constrain the patch envelope: {format}"
+    );
+}
+
+#[tokio::test]
+async fn freeform_tool_executes_the_wrapped_raw_input() {
+    // The stream layer wraps a custom_tool_call's raw payload into
+    // `{"input": <raw>}`; the tool must apply that patch text directly.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let target = temp.path().join("created.txt");
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+hello freeform\n*** End Patch",
+        target.display()
+    );
+    let output = ApplyPatchFreeformTool::new()
+        .execute(
+            serde_json::json!({ "input": patch }),
+            ToolContext {
+                session_id: "patch-freeform".to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(temp.path().to_path_buf()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("freeform apply_patch should succeed");
+    assert!(
+        std::fs::read_to_string(&target).unwrap() == "hello freeform\n",
+        "patch content should be applied: {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn freeform_tool_also_accepts_patch_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let target = temp.path().join("created.txt");
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+via patch_text\n*** End Patch",
+        target.display()
+    );
+    ApplyPatchFreeformTool::new()
+        .execute(
+            serde_json::json!({ "patch_text": patch }),
+            ToolContext {
+                session_id: "patch-freeform-alias".to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(temp.path().to_path_buf()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("patch_text fallback should succeed");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "via patch_text\n"
+    );
+}
+
+#[tokio::test]
+async fn freeform_tool_reports_missing_patch_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let err = ApplyPatchFreeformTool::new()
+        .execute(
+            serde_json::json!({}),
+            ToolContext {
+                session_id: "patch-freeform-empty".to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(temp.path().to_path_buf()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect_err("missing input must error");
+    assert!(err.to_string().contains("input"), "{err}");
+}

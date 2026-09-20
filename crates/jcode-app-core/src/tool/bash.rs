@@ -913,24 +913,53 @@ impl Tool for BashTool {
         }
 
         // Foreground execution with stdin detection
-        let hint = file_edit_hint(&params.command);
+        let edits_files = is_file_edit_command(&params.command);
         let mut output = self.execute_foreground(&params, &ctx).await?;
-        if let Some(hint) = hint {
+        if edits_files
+            && let Some(hint) = file_edit_hint(&crate::experimentals::edit_surface(&ctx.session_id))
+        {
             output.output.push_str("\n\n");
-            output.output.push_str(hint);
+            output.output.push_str(&hint);
         }
         Ok(output)
     }
 }
 
-const FILE_EDIT_HINT: &str = "Note: this command edits files in place. Next time use `edit` \
-(exact replacements, all-or-nothing, pass `edits` for several), `replace` (regex or multi-file, \
-with expected_count), or `apply_patch` (multi-file patches). They fail loudly on a missed match \
-instead of silently writing nothing, and show a reviewable diff.";
+/// Build the file-edit nudge, naming only the editing tools the session can
+/// actually call (e.g. just `apply_patch` when the tool_apply_patch
+/// experimental has removed the edit/write pair).
+fn file_edit_hint(edit_surface: &[String]) -> Option<String> {
+    let has = |name: &str| edit_surface.iter().any(|surface| surface == name);
+    let mut suggestions: Vec<&'static str> = Vec::new();
+    if has("edit") {
+        suggestions.push("`edit` (exact replacements, all-or-nothing, pass `edits` for several)");
+    }
+    if has("replace") {
+        suggestions.push("`replace` (regex or multi-file, with expected_count)");
+    }
+    if has("apply_patch") {
+        suggestions.push("`apply_patch` (multi-file patches)");
+    }
+    let list = match suggestions.len() {
+        0 => return None,
+        1 => suggestions[0].to_string(),
+        2 => format!("{} or {}", suggestions[0], suggestions[1]),
+        _ => format!(
+            "{}, or {}",
+            suggestions[..suggestions.len() - 1].join(", "),
+            suggestions[suggestions.len() - 1]
+        ),
+    };
+    Some(format!(
+        "Note: this command edits files in place. Next time use {list}. \
+         They fail loudly on a missed match instead of silently writing \
+         nothing, and show a reviewable diff."
+    ))
+}
 
 /// Detect shell commands that rewrite source files in place, where a missed
 /// match silently does nothing. The command still runs, the agent is nudged.
-fn file_edit_hint(command: &str) -> Option<&'static str> {
+fn is_file_edit_command(command: &str) -> bool {
     let compact: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let sed_in_place = compact.split(['|', ';', '&']).any(|segment| {
         let mut words = segment.split_whitespace();
@@ -954,12 +983,16 @@ fn file_edit_hint(command: &str) -> Option<&'static str> {
             || compact.contains(", \"w\")")
             || compact.contains("write_text(")
             || compact.contains("writeFileSync("));
-    (sed_in_place || perl_in_place || script_rewrite).then_some(FILE_EDIT_HINT)
+    sed_in_place || perl_in_place || script_rewrite
 }
 
 #[cfg(test)]
 mod file_edit_hint_tests {
-    use super::file_edit_hint;
+    use super::{file_edit_hint, is_file_edit_command};
+
+    fn surface(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
 
     #[test]
     fn flags_in_place_edits() {
@@ -971,7 +1004,7 @@ mod file_edit_hint_tests {
             "python3 - <<'EOF'\ns=open(p).read()\ns=s.replace('a','b')\nopen(p,'w').write(s)\nEOF",
             "python3 -c \"import pathlib;p=pathlib.Path('f');p.write_text(p.read_text().replace('a','b'))\"",
         ] {
-            assert!(file_edit_hint(command).is_some(), "{command}");
+            assert!(is_file_edit_command(command), "{command}");
         }
     }
 
@@ -985,8 +1018,26 @@ mod file_edit_hint_tests {
             "python3 -c \"print('a'.replace('a','b'))\"",
             "git diff --ignore-space-change",
         ] {
-            assert!(file_edit_hint(command).is_none(), "{command}");
+            assert!(!is_file_edit_command(command), "{command}");
         }
+    }
+
+    #[test]
+    fn hint_names_the_active_editing_tools() {
+        let full = file_edit_hint(&surface(&["edit", "replace", "apply_patch"])).unwrap();
+        assert!(full.contains("`edit`"), "{full}");
+        assert!(full.contains("`replace`"), "{full}");
+        assert!(full.contains("`apply_patch`"), "{full}");
+
+        // tool_apply_patch surface: the edit/write pair is excluded, so the
+        // nudge must not tell the model to call a tool it does not have.
+        let patch_only = file_edit_hint(&surface(&["replace", "apply_patch"])).unwrap();
+        assert!(!patch_only.contains("`edit`"), "{patch_only}");
+        assert!(patch_only.contains("`replace`"), "{patch_only}");
+        assert!(patch_only.contains("`apply_patch`"), "{patch_only}");
+
+        // No editing tools at all: no hint rather than a wrong one.
+        assert!(file_edit_hint(&surface(&[])).is_none());
     }
 }
 

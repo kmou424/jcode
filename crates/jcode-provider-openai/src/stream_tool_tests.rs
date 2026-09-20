@@ -259,7 +259,11 @@ fn mismatched_done_arguments_fail_instead_of_corrupting_tool_input() {
 }
 
 #[test]
-fn custom_tool_input_events_stream_before_completion() {
+fn custom_tool_input_is_buffered_and_wrapped_into_json() {
+    // Freeform (custom) tool input is raw text, not JSON. Raw fragments cannot
+    // be wrapped incrementally, so nothing streams until the call completes;
+    // the single emitted delta is the payload wrapped as `{"input": ...}` so
+    // the downstream ToolCall input stays a JSON object.
     let (tx, mut stream) = stream();
     send(
         &tx,
@@ -272,13 +276,17 @@ fn custom_tool_input_events_stream_before_completion() {
         &tx,
         json!({"type":"response.custom_tool_call_input.delta", "item_id":"a", "delta":"*** Begin Patch\n"}),
     );
-    assert_delta(&mut stream, "a", "*** Begin Patch\n");
     idle(&mut stream);
     send(
         &tx,
         json!({"type":"response.custom_tool_call_input.done", "item_id":"a", "input":"*** Begin Patch\n*** End Patch"}),
     );
-    assert_delta(&mut stream, "a", "*** End Patch");
+    // The accumulated raw input is delivered once, wrapped into a JSON object.
+    assert_delta(
+        &mut stream,
+        "a",
+        &json!({"input": "*** Begin Patch\n*** End Patch"}).to_string(),
+    );
     assert_end(&mut stream, "a");
     idle(&mut stream);
 }
@@ -402,7 +410,11 @@ fn unstable_item_ids_stream_incrementally_and_deduplicate_done_snapshots() {
             idle(&mut stream);
             for (i, fragment) in fragments[..2].iter().enumerate() {
                 indexed_arguments(&tx, 0, &format!("delta_{i}"), custom, false, fragment);
-                assert_any_delta(&mut stream, fragment);
+                // Custom (freeform) calls buffer raw text and emit only on
+                // completion; function calls still stream incrementally.
+                if !custom {
+                    assert_any_delta(&mut stream, fragment);
+                }
                 idle(&mut stream);
             }
             if item_done_only {
@@ -410,7 +422,11 @@ fn unstable_item_ids_stream_incrementally_and_deduplicate_done_snapshots() {
             } else {
                 indexed_arguments(&tx, 0, "arguments_done", custom, true, &full);
             }
-            assert_any_delta(&mut stream, fragments[2]);
+            if custom {
+                assert_any_delta(&mut stream, &json!({ "input": full.clone() }).to_string());
+            } else {
+                assert_any_delta(&mut stream, fragments[2]);
+            }
             assert_any_end(&mut stream);
             indexed_item(&tx, 0, "another_item_done", custom, true, &full);
             indexed_arguments(&tx, 0, "another_arguments_done", custom, true, &full);
@@ -430,7 +446,8 @@ fn unstable_item_ids_keep_interleaved_calls_separate() {
     indexed_item(&tx, 1, "b_added", true, false, "");
     assert_start(&mut stream, "1", "apply_patch");
     indexed_arguments(&tx, 1, "b_delta", true, false, "*** Begin Patch\n");
-    assert_delta(&mut stream, "1", "*** Begin Patch\n");
+    // Custom calls buffer: the delta produces no mid-stream output.
+    idle(&mut stream);
     indexed_arguments(
         &tx,
         1,
@@ -439,7 +456,11 @@ fn unstable_item_ids_keep_interleaved_calls_separate() {
         true,
         "*** Begin Patch\n*** End Patch",
     );
-    assert_delta(&mut stream, "1", "*** End Patch");
+    assert_delta(
+        &mut stream,
+        "1",
+        &json!({ "input": "*** Begin Patch\n*** End Patch" }).to_string(),
+    );
     assert_end(&mut stream, "1");
     indexed_item(
         &tx,
@@ -618,4 +639,48 @@ fn blank_snapshot_call_id_does_not_replace_buffered_stable_id() {
     assert_delta(&mut stream, "0", "{}");
     assert_end(&mut stream, "0");
     idle(&mut stream);
+}
+
+#[test]
+fn custom_tool_done_only_call_is_wrapped_into_json() {
+    // A custom call that arrives without prior output_item.added or deltas is
+    // still marked by the custom_tool_call_input.done event name.
+    let (tx, mut stream) = stream();
+    send(
+        &tx,
+        json!({"type":"response.custom_tool_call_input.done", "item_id":"a",
+        "call_id":"call_a", "name":"apply_patch", "input":"*** Begin Patch\n*** End Patch"}),
+    );
+    assert_start(&mut stream, "a", "apply_patch");
+    assert_delta(
+        &mut stream,
+        "a",
+        &json!({"input": "*** Begin Patch\n*** End Patch"}).to_string(),
+    );
+    assert_end(&mut stream, "a");
+    idle(&mut stream);
+}
+
+#[test]
+fn output_item_custom_tool_call_wraps_input() {
+    let mut saw_text = false;
+    let mut saw_thinking = false;
+    let mut pending = VecDeque::new();
+    let item = json!({
+        "type": "custom_tool_call",
+        "call_id": "call_a",
+        "name": "apply_patch",
+        "input": "*** Begin Patch\n*** End Patch"
+    });
+    let first = handle_openai_output_item(item, &mut saw_text, &mut saw_thinking, &mut pending);
+    assert!(matches!(first, Some(StreamEvent::ToolUseStart { .. })));
+    assert!(matches!(
+        pending.pop_front(),
+        Some(StreamEvent::ToolInputDeltaFor { id, delta })
+            if id == "call_a" && delta == json!({"input": "*** Begin Patch\n*** End Patch"}).to_string()
+    ));
+    assert!(matches!(
+        pending.pop_front(),
+        Some(StreamEvent::ToolUseEndFor { id }) if id == "call_a"
+    ));
 }
