@@ -424,10 +424,18 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
     let mut math_delimiter = None;
     let mut wrapped_environment: Option<(String, usize)> = None;
     let mut literal_environment: Option<(String, usize)> = None;
+    // Reasoning markup escapes `[`/`]` as `\[`/`\]` so bracketed text such as
+    // `[04]` survives link parsing; inside the sentinel-wrapped emphasis run
+    // those escapes must not be reinterpreted as LaTeX display-math delimiters.
+    let mut in_reasoning_markup = false;
 
     while index < text.len() {
         let rest = &text[index..];
         let ch = rest.chars().next().expect("index stays on a char boundary");
+
+        if ch == '\u{2063}' {
+            in_reasoning_markup = !in_reasoning_markup;
+        }
 
         if ch == '\n' {
             out.push(ch);
@@ -558,6 +566,7 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
         if math_delimiter.is_none()
             && rest.starts_with("\\(")
             && !is_escaped_at(text, index)
+            && !in_reasoning_markup
             && has_unescaped_delimiter(&rest[2..], "\\)")
         {
             out.push('$');
@@ -577,6 +586,7 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
         if math_delimiter.is_none()
             && rest.starts_with("\\[")
             && !is_escaped_at(text, index)
+            && !in_reasoning_markup
             && has_unescaped_delimiter(&rest[2..], "\\]")
             && !looks_like_escaped_markdown_link(rest)
         {
@@ -598,6 +608,7 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
         if ch == '\\'
             && math_delimiter.is_none()
             && wrapped_environment.is_none()
+            && !is_escaped_at(text, index)
             && let Some((name, marker_len)) = environment_marker(rest, "begin")
             && DISPLAY_MATH_ENVIRONMENTS.contains(&name)
         {
@@ -931,6 +942,27 @@ mod tests {
 
         let unmatched = r"\begin{matrix}\begin{matrix}a\end{matrix}";
         assert_eq!(normalize_latex_math(unmatched), unmatched);
+    }
+
+    #[test]
+    fn leaves_escaped_environment_begin_alone() {
+        // An escaped `\begin` (markdown `\\begin`) is literal text, not math.
+        let input = r"literal \\begin{align} x \\end{align} text";
+        assert_eq!(normalize_latex_math(input), input);
+    }
+
+    #[test]
+    fn leaves_escaped_brackets_inside_reasoning_markup_alone() {
+        // `reasoning_line_markup` escapes `[`/`]` to `\[`/`\]` inside the
+        // sentinel-wrapped emphasis run; they are literal brackets, not math.
+        let sentinel = '\u{2063}';
+        let input = format!("*{sentinel}the \\[04\\] patch and \\[12\\]{sentinel}*");
+        assert_eq!(normalize_latex_math(&input), input);
+        // Outside the sentinel run the same text still converts to math.
+        assert_eq!(normalize_latex_math(r"\[x^2\]"), "$$x^2$$");
+        // Normal text after the closed reasoning run still converts.
+        let mixed = format!("{input}\n\\[x^2\\]");
+        assert_eq!(normalize_latex_math(&mixed), format!("{input}\n$$x^2$$"));
     }
 
     #[test]
