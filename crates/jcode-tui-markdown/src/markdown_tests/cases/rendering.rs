@@ -1035,6 +1035,7 @@ fn test_reasoning_line_survives_embedded_markdown() {
         "angle <tag> and ampersand a & b",
         "leading # not a heading and - not a list",
         "math $x^2$ and $$y$$ dollar spans",
+        "bracketed patch ids like [04] and [NN] are literal",
         "backslash path C:\\\\Users\\\\name",
         "unbalanced *open emphasis that never closes",
         "unbalanced `open code that never closes",
