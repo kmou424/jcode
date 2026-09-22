@@ -179,6 +179,15 @@ pub(crate) enum Command {
     /// Connect to a running server
     Connect,
 
+    /// Browse directories in a two-pane picker, then launch jcode rooted at
+    /// the chosen directory (the same picker `/open` shows inside the TUI)
+    Open {
+        /// Directory to start browsing from (default: current directory;
+        /// over `--ssh`, a remote path, defaulting to the remote login
+        /// HOME or `--remote-working-dir`)
+        path: Option<String>,
+    },
+
     /// Run a single message and exit
     Run {
         /// Emit a machine-readable JSON result instead of streaming text

@@ -146,6 +146,9 @@ pub enum SshOp {
     WriteFile { path: String, content: String },
     /// Filename-prefix listing over a remote directory.
     ListPath { prefix: String },
+    /// Full directory listing plus a compact git summary, powering the
+    /// `/open` directory browser's two panes over the wire.
+    BrowseDir { path: String },
     /// Effective skill list for the bridge's working directory (global
     /// registry + project overlay).
     ListSkills,
@@ -187,7 +190,36 @@ pub enum SshOpResult {
     },
     WriteFile,
     ListPath(Vec<String>),
+    BrowseDir {
+        /// Absolute remote path that was listed.
+        path: String,
+        entries: Vec<SshDirEntry>,
+        /// Git summary of `path`; None when it is not inside a work tree
+        /// or git is unavailable.
+        git: Option<SshDirGitSummary>,
+    },
     ListSkills(Vec<SshSkillInfo>),
+}
+
+/// One directory entry returned by `browse_dir`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+}
+
+/// Compact git summary for a browsed directory. `dirty` counts tracked
+/// modifications plus untracked files (mirroring the local picker's
+/// dirty-file count); `ahead`/`behind` are vs. `@{upstream}` when set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshDirGitSummary {
+    pub is_repo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub dirty: usize,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 /// Response payload inside the sideband envelope. Flattened outcome:
@@ -279,6 +311,7 @@ pub fn execute(request: SshOpRequest, ctx: &SshOpContext) -> SshOpResponse {
         SshOp::ReadFile { path } => op_read_file(&path, &ctx.working_dir),
         SshOp::WriteFile { path, content } => op_write_file(&path, &content, &ctx.working_dir),
         SshOp::ListPath { prefix } => op_list_path(&prefix, &ctx.working_dir),
+        SshOp::BrowseDir { path } => op_browse_dir(&path, &ctx.working_dir),
         SshOp::ListSkills => op_list_skills(&ctx.working_dir),
     };
     SshOpResponse { id, outcome }
@@ -608,6 +641,107 @@ fn op_list_path(prefix: &str, cwd: &str) -> SshOpOutcome {
     }
 }
 
+// --- directory browser op -------------------------------------------
+
+/// `browse_dir` for the `/open` directory browser: one shot returns the
+/// directory's full entry list (sorted, dotfiles included) plus a git
+/// summary of that directory for the right pane.
+fn op_browse_dir(path: &str, cwd: &str) -> SshOpOutcome {
+    let resolved = resolve_remote_path(path, cwd);
+    let entries = match std::fs::read_dir(&resolved) {
+        Ok(read_dir) => {
+            let mut entries: Vec<SshDirEntry> = read_dir
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    let file_type = entry.file_type().ok();
+                    let is_symlink = file_type.is_some_and(|t| t.is_symlink());
+                    let is_dir = if is_symlink {
+                        entry.metadata().map(|m| m.is_dir()).unwrap_or(false)
+                    } else {
+                        file_type.is_some_and(|t| t.is_dir())
+                    };
+                    SshDirEntry {
+                        name: entry.file_name().to_string_lossy().to_string(),
+                        is_dir,
+                        is_symlink,
+                    }
+                })
+                .collect();
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+            entries
+        }
+        Err(error) => {
+            return err(format!("Failed to list {}: {error}", resolved.display()));
+        }
+    };
+    ok(SshOpResult::BrowseDir {
+        git: remote_dir_git_summary(&resolved),
+        path: resolved.display().to_string(),
+        entries,
+    })
+}
+
+/// Git summary for `dir`, run bridge-side. Returns None when the directory
+/// is not inside a work tree or git is missing. `dirty` counts staged +
+/// modified + untracked porcelain rows.
+fn remote_dir_git_summary(dir: &Path) -> Option<SshDirGitSummary> {
+    use std::process::Command;
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+    };
+
+    let in_repo = git(&["rev-parse", "--is-inside-work-tree"])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !in_repo {
+        return None;
+    }
+
+    let branch = git(&["branch", "--show-current"]).and_then(|o| {
+        if !o.status.success() {
+            return Some("HEAD".to_string());
+        }
+        let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        Some(if b.is_empty() { "HEAD".to_string() } else { b })
+    });
+
+    let dirty = git(&["status", "--porcelain"])
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|line| line.len() >= 3)
+                .count()
+        })
+        .unwrap_or(0);
+
+    let (ahead, behind) = git(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let mut parts = text.split('\t');
+            Some((
+                parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            ))
+        })
+        .unwrap_or((0, 0));
+
+    Some(SshDirGitSummary {
+        is_repo: true,
+        branch,
+        dirty,
+        ahead,
+        behind,
+    })
+}
+
 // --- skills op -------------------------------------------------------
 
 fn op_list_skills(working_dir: &str) -> SshOpOutcome {
@@ -630,4 +764,94 @@ fn op_list_skills(working_dir: &str) -> SshOpOutcome {
         })
         .unwrap_or_default();
     ok(SshOpResult::ListSkills(infos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_dir_request_roundtrips() {
+        let request = SshOpRequest {
+            id: 7,
+            op: SshOp::BrowseDir {
+                path: "/srv/proj".to_string(),
+            },
+        };
+        let line = encode_request(&request).unwrap();
+        assert_eq!(
+            line,
+            r#"{"__jcode_ssh_op":{"id":7,"op":"browse_dir","path":"/srv/proj"}}"#
+        );
+        let decoded = decode_request(&line).unwrap();
+        assert!(matches!(
+            decoded.op,
+            SshOp::BrowseDir { ref path } if path == "/srv/proj"
+        ));
+    }
+
+    #[test]
+    fn browse_dir_response_roundtrips() {
+        let response = SshOpResponse {
+            id: 7,
+            outcome: SshOpOutcome::Result(SshOpResult::BrowseDir {
+                path: "/srv/proj".to_string(),
+                entries: vec![
+                    SshDirEntry {
+                        name: "src".to_string(),
+                        is_dir: true,
+                        is_symlink: false,
+                    },
+                    SshDirEntry {
+                        name: "lib".to_string(),
+                        is_dir: true,
+                        is_symlink: true,
+                    },
+                ],
+                git: Some(SshDirGitSummary {
+                    is_repo: true,
+                    branch: Some("main".to_string()),
+                    dirty: 3,
+                    ahead: 1,
+                    behind: 2,
+                }),
+            }),
+        };
+        let line = encode_response(&response).unwrap();
+        let decoded = decode_response(&line).unwrap();
+        assert_eq!(decoded.id, 7);
+        let SshOpOutcome::Result(SshOpResult::BrowseDir { path, entries, git }) = decoded.outcome
+        else {
+            panic!("expected browse_dir result");
+        };
+        assert_eq!(path, "/srv/proj");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].is_symlink);
+        let git = git.expect("git summary");
+        assert_eq!(git.branch.as_deref(), Some("main"));
+        assert_eq!((git.dirty, git.ahead, git.behind), (3, 1, 2));
+    }
+
+    #[test]
+    fn browse_dir_lists_and_reports_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("zdir")).unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+        let ctx = SshOpContext::default();
+        let outcome = op_browse_dir(&tmp.path().display().to_string(), &ctx.working_dir);
+        let SshOpOutcome::Result(SshOpResult::BrowseDir { path, entries, git }) = outcome else {
+            panic!("expected browse_dir result");
+        };
+        assert_eq!(path, tmp.path().display().to_string());
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["zdir", "a.txt"]);
+        assert!(git.is_none() || git.as_ref().is_some_and(|g| g.is_repo));
+    }
+
+    #[test]
+    fn browse_dir_missing_dir_is_an_error() {
+        let ctx = SshOpContext::default();
+        let outcome = op_browse_dir("/definitely/not/here", &ctx.working_dir);
+        assert!(matches!(outcome, SshOpOutcome::Error(_)));
+    }
 }

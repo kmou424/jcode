@@ -325,6 +325,11 @@ async fn handle_remote_key_internal(
         return app.handle_session_picker_key(code, modifiers);
     }
 
+    if app.dir_browser_overlay.is_some() {
+        app.handle_dir_browser_key(code, modifiers)?;
+        return Ok(());
+    }
+
     if app.login_picker_overlay.is_some() {
         return app.handle_login_picker_key(code, modifiers);
     }

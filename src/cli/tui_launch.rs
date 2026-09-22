@@ -18,6 +18,65 @@ use super::terminal::{
 
 pub(crate) use crate::session_launch::resumed_window_title;
 
+/// `jcode open`: run the `/open` directory browser standalone. Returns the
+/// directory picked with Enter, or None when the user quit with Esc/q —
+/// the caller then either chdir's into it and continues a normal launch,
+/// or exits without starting a session.
+pub fn run_open_picker(start: Option<String>) -> Result<Option<String>> {
+    let cwd = std::env::current_dir()?;
+    let start = start.unwrap_or_else(|| ".".to_string());
+    run_open_picker_loop(start, false, move |path| {
+        crate::tui::dir_browser::load_local(path, &cwd)
+    })
+}
+
+/// Interactive browser loop shared by `jcode open` (local listings) and
+/// `jcode --ssh <host> open` (`browse_dir` sideband listings). `loader`
+/// produces a `DirListing` for each navigated path; it runs on the calling
+/// thread, so SSH callers should invoke this inside `spawn_blocking` and
+/// let the loader round-trip through a channel to the async bridge task.
+/// `remote` selects the SSH display label inside the picker.
+pub(crate) fn run_open_picker_loop(
+    start: String,
+    remote: bool,
+    loader: impl Fn(&str) -> Result<crate::tui::dir_browser::DirListing, String>,
+) -> Result<Option<String>> {
+    use crate::tui::dir_browser::{DirBrowser, DirBrowserAction};
+    use crossterm::event::{Event, KeyEventKind};
+
+    let (mut terminal, tui_runtime) = init_tui_runtime()?;
+    let mut browser = DirBrowser::new(start.clone(), remote);
+    browser.apply_listing(loader(&start));
+
+    let mut picked: Option<String> = None;
+    loop {
+        terminal.draw(|frame| browser.render(frame))?;
+        if !crossterm::event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(key) = crossterm::event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match browser.handle_overlay_key(key.code, key.modifiers) {
+            DirBrowserAction::Continue => {}
+            DirBrowserAction::Close => break,
+            DirBrowserAction::Load(path) => {
+                browser.mark_loading();
+                browser.apply_listing(loader(&path));
+            }
+            DirBrowserAction::OpenAt(path) => {
+                picked = Some(path);
+                break;
+            }
+        }
+    }
+    tui_runtime.finish(true);
+    Ok(picked)
+}
+
 pub async fn run_client() -> Result<()> {
     let mut client = server::Client::connect().await?;
 
