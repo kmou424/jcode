@@ -50,7 +50,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             // Actions that would open paths or terminals on the laptop while
             // the real files live on the remote host.
             | "/transcript"
-            | "/open"
             | "/file"
             | "/new-terminal"
             | "/selfdev"
@@ -99,6 +98,7 @@ pub(super) fn dispatch_ssh_local_command(app: &mut App, trimmed: &str) -> bool {
     if super::commands::handle_cancel_command(app, trimmed)
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_diff_command(app, trimmed)
+        || super::dir_browser_cmds::handle_open_command(app, trimmed)
         || handle_ssh_session_picker_command(app, trimmed)
     {
         return true;
@@ -196,6 +196,7 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_ssh_command(app, trimmed)
+        || super::dir_browser_cmds::handle_open_command(app, trimmed)
         // `/test`, `/mission`, `/goal`, and `/goals` are dispatched inside
         // `handle_session_command`, so they need no separate entries here.
         || super::commands::handle_session_command(app, trimmed)
@@ -334,7 +335,6 @@ mod tests {
             "/logout all",
             "/account add",
             "/permissions",
-            "/open /etc/passwd",
             "/selfdev status",
             "/transcript path",
             "/ssh connect host",
@@ -373,6 +373,7 @@ mod tests {
             "/login-custom-skill",
             "/configurable-skill",
             // Wire-backed or client-rendered commands — not blocked.
+            "/open",
             "/reload",
             "/client-reload",
             "/restart",

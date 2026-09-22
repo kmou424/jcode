@@ -66,6 +66,7 @@ mod conversation_state;
 mod copy_selection;
 mod debug;
 mod dictation;
+mod dir_browser_cmds;
 mod event_wrappers;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
@@ -283,6 +284,12 @@ struct PendingSessionPickerLoad {
             Vec<super::session_picker::SessionInfo>,
         )>,
     >,
+}
+
+/// In-flight local directory listing for the `/open` browser. Remote
+/// listings travel as `browse_dir` sideband replies instead.
+struct PendingDirBrowserLoad {
+    receiver: mpsc::Receiver<Result<super::dir_browser::DirListing, String>>,
 }
 
 struct PendingModelPickerLoad {
@@ -1712,6 +1719,17 @@ pub struct App {
     /// items (drained on the remote poll loop; the reply arrives as a
     /// `get_todos` sideband reply and renders the card).
     pending_remote_todos_request: bool,
+    /// `/open` directory browser overlay (None = not visible).
+    dir_browser_overlay: Option<RefCell<super::dir_browser::DirBrowser>>,
+    /// Local mode: in-flight listing for the directory browser.
+    pending_dir_browser_load: Option<PendingDirBrowserLoad>,
+    /// SSH mode: a `browse_dir` request the remote poll loop still owes the
+    /// bridge for the directory browser.
+    pending_remote_dir_browse: Option<String>,
+    /// SSH mode: the request id of the in-flight `browse_dir` op. Replies
+    /// for older ids are dropped so a slow navigation cannot clobber a newer
+    /// listing.
+    remote_dir_browse_inflight: Option<u64>,
     /// SSH mode: `/config edit` asked the remote loop to send a `read_config`
     /// request so the raw remote `config.toml` (comments included) can be
     /// round-tripped through the local `$EDITOR`.

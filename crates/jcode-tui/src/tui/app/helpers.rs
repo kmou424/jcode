@@ -874,6 +874,63 @@ pub(super) fn spawn_ssh_session_in_new_terminal(
     spawn_command_in_new_terminal(exe, &args, &title, cwd)
 }
 
+/// Rebuild the argv that opens a fresh SSH session anchored at `remote_dir`,
+/// reproducing this client's `--ssh` flags from the env vars the attach path
+/// set. The picked remote dir travels as `JCODE_SSH_OPEN_DIR` on the child's
+/// environment — read by `ssh run` as the workspace `--cwd` — so the spawned
+/// command never needs the deprecated `--remote-working-dir` flag.
+pub(super) fn ssh_open_dir_args() -> Option<Vec<String>> {
+    let host = crate::tui::ssh_remote_host()?;
+    let mut args = vec!["--ssh".to_string(), host];
+    for (flag, variable) in [
+        ("--ssh-binary", "JCODE_SSH_BINARY"),
+        ("--ssh-server-socket", "JCODE_SSH_SERVER_SOCKET"),
+    ] {
+        if let Some(value) = std::env::var(variable)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    Some(args)
+}
+
+/// `/open` Enter action: open a fresh jcode rooted at `dir` in a new
+/// terminal window. `remote_dir` is Some for SSH clients — the child argv
+/// attaches over SSH with the remote path instead of launching locally.
+/// `cwd` is the terminal's working directory on the local host either way.
+/// Returns Ok(false) when no supported terminal was found.
+pub(super) fn spawn_dir_session_in_new_terminal(
+    exe: &Path,
+    dir: &Path,
+    remote_dir: Option<&str>,
+    cwd: &Path,
+) -> anyhow::Result<bool> {
+    if let Some(remote_dir) = remote_dir {
+        let Some(args) = ssh_open_dir_args() else {
+            return Ok(false);
+        };
+        if cfg!(test) {
+            // Never launch real terminal windows from unit tests.
+            return Ok(false);
+        }
+        let title = format!("jcode · {remote_dir}");
+        let command = crate::terminal_launch::TerminalCommand::new(exe, args)
+            .title(title)
+            .spawn_env("JCODE_SSH_OPEN_DIR", remote_dir);
+        return crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd);
+    }
+    if cfg!(test) {
+        return Ok(false);
+    }
+    let socket = std::env::var("JCODE_SOCKET").ok();
+    let command = build_fresh_session_command(socket.as_deref());
+    crate::terminal_launch::spawn_command_in_new_terminal(&command, dir)
+}
+
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod helpers_tests;

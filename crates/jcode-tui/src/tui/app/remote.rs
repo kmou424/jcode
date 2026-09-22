@@ -138,7 +138,23 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
+    needs_redraw |= app.poll_dir_browser_load();
     needs_redraw |= app.poll_session_picker_presence();
+
+    // `/open` over SSH: the browser queues one `browse_dir` request at a
+    // time; the reply lands as a `browse_dir` sideband reply.
+    if let Some(path) = app.pending_remote_dir_browse.take() {
+        match remote.browse_dir(path).await {
+            Ok(id) => app.remote_dir_browse_inflight = Some(id),
+            Err(err) => {
+                if let Some(cell) = app.dir_browser_overlay.as_ref() {
+                    cell.borrow_mut()
+                        .apply_listing(Err(format!("Failed to browse remote directory: {err}")));
+                    needs_redraw = true;
+                }
+            }
+        }
+    }
 
     // Remote session picker (SSH `/resume`): send the one-shot list request
     // plus the preview prefetch queue the picker seeded when the list landed.
@@ -1061,6 +1077,13 @@ pub(super) fn handle_sideband_reply(
     let result = match outcome {
         SshOpOutcome::Result(result) => result,
         SshOpOutcome::Error(message) => {
+            if app.remote_dir_browse_inflight == Some(id) {
+                app.remote_dir_browse_inflight = None;
+                if let Some(cell) = app.dir_browser_overlay.as_ref() {
+                    cell.borrow_mut().apply_listing(Err(message));
+                }
+                return true;
+            }
             if remote_files::handle_remote_file_error(app, id, &message) {
                 return true;
             }
@@ -1089,6 +1112,9 @@ pub(super) fn handle_sideband_reply(
         }
         SshOpResult::WriteConfig | SshOpResult::WriteFile => true,
         SshOpResult::ListPath(paths) => remote_files::handle_path_candidates(app, id, paths),
+        SshOpResult::BrowseDir { path, entries, git } => {
+            app.apply_remote_dir_browse(id, path, entries, git)
+        }
         SshOpResult::ListSkills(infos) => {
             // `History.skills` arrives empty on remotes without the
             // persisted-path seed, and an empty History may land after this

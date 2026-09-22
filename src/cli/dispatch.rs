@@ -175,6 +175,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Connect) => {
             tui_launch::run_client().await?;
         }
+        Some(Command::Open { path }) => {
+            // Standalone directory picker; Enter chdir's into the pick and
+            // continues a normal launch, Esc exits without starting one.
+            match tui_launch::run_open_picker(path)? {
+                Some(dir) => {
+                    std::env::set_current_dir(&dir)?;
+                    args.cwd = Some(dir);
+                    args.command = None;
+                    run_default_command(args).await?;
+                }
+                None => {}
+            }
+        }
         #[cfg(unix)]
         Some(Command::ApiBridge { api_socket, stdio }) => {
             if stdio {

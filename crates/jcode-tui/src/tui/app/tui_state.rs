@@ -1987,6 +1987,10 @@ impl crate::tui::TuiState for App {
         self.session_picker_overlay.as_ref()
     }
 
+    fn dir_browser_overlay(&self) -> Option<&RefCell<crate::tui::dir_browser::DirBrowser>> {
+        self.dir_browser_overlay.as_ref()
+    }
+
     fn login_picker_overlay(&self) -> Option<&RefCell<crate::tui::login_picker::LoginPicker>> {
         self.login_picker_overlay.as_ref()
     }

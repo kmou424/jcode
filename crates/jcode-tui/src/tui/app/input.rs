@@ -2659,6 +2659,11 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.dir_browser_overlay.is_some() {
+        app.handle_dir_browser_key(code, modifiers)?;
+        return Ok(true);
+    }
+
     if app.login_picker_overlay.is_some() {
         if super::commands_dispatch::ssh_local_action_blocked(app, "Local login picker") {
             app.login_picker_overlay = None;

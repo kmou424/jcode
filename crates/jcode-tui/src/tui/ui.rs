@@ -2803,6 +2803,19 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(browser_cell) = app.dir_browser_overlay() {
+        let mut browser = browser_cell.borrow_mut();
+        browser.render(frame);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(picker_cell) = app.login_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
         picker.render(frame);

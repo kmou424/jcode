@@ -156,6 +156,111 @@ impl Drop for NativeSsh {
     }
 }
 
+/// A probe bridge held open for `browse_dir` sideband ops. `jcode --ssh
+/// <host> open` runs the directory picker against this connection before
+/// the real workspace bridge is established — the workspace `--cwd` can
+/// only be chosen once the user has picked a directory.
+pub(crate) struct RemoteBrowser {
+    conn: SshConnection,
+    next_id: u64,
+}
+
+impl RemoteBrowser {
+    /// Spawn a probe bridge the same way `connect_with_workspace` does:
+    /// host/binary/shell validation, login-shell detection, then the
+    /// remote `jcode server stdio` handshake. `start` becomes the remote
+    /// `--cwd` (None leaves the remote at its login HOME).
+    pub async fn connect(
+        host: &str,
+        remote_binary: &str,
+        daemon_socket: Option<&str>,
+        start: Option<&str>,
+    ) -> Result<Self> {
+        let mut options = SshOptions::new(host, remote_binary)?;
+        if daemon_socket
+            .is_some_and(|socket| socket.is_empty() || socket.chars().any(char::is_control))
+        {
+            bail!(
+                "remote daemon socket must be a literal nonempty path without control characters"
+            );
+        }
+        options.daemon_socket = daemon_socket.map(str::to_owned);
+        if start.is_some_and(|path| path.is_empty() || path.chars().any(char::is_control)) {
+            bail!(
+                "remote working directory must be a literal nonempty path without control characters"
+            );
+        }
+        options.working_dir = start.map(str::to_owned);
+        options.shell = options.probe_shell().await;
+        let conn = SshConnection::connect(&options).await?;
+        Ok(Self { conn, next_id: 1 })
+    }
+
+    /// Resolved remote browse root (`--cwd` or remote HOME).
+    pub fn working_dir(&self) -> &str {
+        &self.conn.handshake.working_dir
+    }
+
+    /// Whether the remote bridge carries the client-op sideband.
+    pub fn sideband_ops(&self) -> bool {
+        self.conn.handshake.sideband_ops
+    }
+
+    /// Run one `browse_dir` round-trip and return the typed result. The
+    /// stream is otherwise quiet on a probe bridge, but replies are still
+    /// matched by id and unrelated lines skipped with a cap.
+    pub async fn browse(&mut self, path: &str) -> Result<crate::ssh_ops::SshOpResult> {
+        const BROWSE_TIMEOUT: Duration = Duration::from_secs(15);
+        const MAX_SKIPPED_LINES: usize = 64;
+
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = crate::ssh_ops::SshOpRequest {
+            id,
+            op: crate::ssh_ops::SshOp::BrowseDir {
+                path: path.to_string(),
+            },
+        };
+        let line = crate::ssh_ops::encode_request(&request)? + "\n";
+        tokio::time::timeout(BROWSE_TIMEOUT, async {
+            self.conn.writer.write_all(line.as_bytes()).await?;
+            self.conn.writer.flush().await?;
+            let mut skipped = 0usize;
+            loop {
+                let frame = read_bounded_line(&mut self.conn.reader).await?;
+                if !crate::ssh_ops::is_op_line(&frame) {
+                    skipped += 1;
+                    if skipped >= MAX_SKIPPED_LINES {
+                        bail!("remote bridge stopped answering browse_dir requests");
+                    }
+                    continue;
+                }
+                let response: crate::ssh_ops::SshOpResponse =
+                    crate::ssh_ops::decode_response(String::from_utf8_lossy(&frame).trim_end())
+                        .context("invalid sideband op reply from remote bridge")?;
+                if response.id != id {
+                    skipped += 1;
+                    if skipped >= MAX_SKIPPED_LINES {
+                        bail!("remote bridge stopped answering browse_dir requests");
+                    }
+                    continue;
+                }
+                return match response.outcome {
+                    crate::ssh_ops::SshOpOutcome::Result(result) => Ok(result),
+                    crate::ssh_ops::SshOpOutcome::Error(message) => bail!(message),
+                };
+            }
+        })
+        .await
+        .context("remote browse_dir request timed out")?
+    }
+
+    /// Reap the SSH child before the runtime moves on.
+    pub async fn close(&mut self) {
+        self.conn.shutdown().await;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoteShell {
     Posix,

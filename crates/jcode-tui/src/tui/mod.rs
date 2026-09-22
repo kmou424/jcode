@@ -30,6 +30,7 @@ pub struct BackgroundTaskRow {
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
+pub mod dir_browser;
 pub(crate) mod fuzzy;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
@@ -840,6 +841,10 @@ pub trait TuiState {
     }
     /// Session picker overlay for /resume command
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    /// `/open` directory browser overlay.
+    fn dir_browser_overlay(&self) -> Option<&std::cell::RefCell<dir_browser::DirBrowser>> {
+        None
+    }
     /// Login picker overlay for /login command
     fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
     /// Account picker overlay for /account command

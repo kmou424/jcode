@@ -164,6 +164,9 @@ impl App {
             "resume" | "sessions" => {
                 "/resume\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and resume the highlighted session. By default, Enter resumes in the current terminal and Ctrl+Enter opens a new terminal; keybindings.session_picker_enter can swap those actions.{resume_shortcut}\n\nPress Esc to return to your current session."
             }
+            "open" => {
+                "/open\nOpen the two-pane directory browser (the same picker `jcode open` shows standalone). The left pane lists the current directory — directories first, then files — and the right pane shows path, entry counts, and git summary.\n\nEnter opens a NEW jcode rooted at the highlighted directory (or the listed directory when a file is highlighted) in a separate terminal; the current session is untouched. Left enters the highlighted directory, Right goes to the parent, Up/Down or j/k move the highlight, Esc closes.\n\n/open <path>\nOpen the browser at a specific directory.\n\nOver SSH, the browser lists remote directories through the bridge's `browse_dir` sideband op; Enter spawns a new terminal attached with `--ssh <host>` carrying `JCODE_SSH_OPEN_DIR=<dir>` on its environment. Requires a remote bridge new enough to advertise sideband ops."
+            }
             "info" => "/info\nShow session metadata and token usage.",
             "context" => {
                 "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."

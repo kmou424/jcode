@@ -817,6 +817,19 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// List a remote directory for the `/open` browser. The reply arrives
+    /// as a `browse_dir` sideband reply carrying entries plus a git summary.
+    pub async fn browse_dir(&mut self, path: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_sideband_op(SshOpRequest {
+            id,
+            op: SshOp::BrowseDir { path },
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Send a sideband client-op envelope to the SSH stdio bridge.
     /// Ops are only available when the remote bridge advertises
     /// `sideband_ops` in its handshake (surfaced as `JCODE_SSH_OPS=1`).
