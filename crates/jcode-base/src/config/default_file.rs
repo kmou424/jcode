@@ -439,6 +439,12 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "medium"
 #
+# Whether the `swarm` tool may accept per-call `model`/`effort` overrides.
+# Set false to hide both parameters from the tool schema and reject explicit
+# `model` values at dispatch; `swarm_model`/`swarm_effort` remain the only way
+# to steer worker model selection. Defaults to true.
+# swarm_allow_override_model = true
+#
 # Root model reasoning while /effort swarm or /effort swarm-deep is selected.
 # These are independent of worker swarm_effort. Supported levels:
 # none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).

@@ -1774,7 +1774,13 @@ fn format_swarm_model_list(
             route.model, route.provider, route.api_method, availability, cost, detail
         ));
     }
-    out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
+    if swarm_model_overrides_allowed() {
+        out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
+    } else {
+        out.push_str(
+            "\nModel/effort overrides are locked by agents.swarm_allow_override_model = false.",
+        );
+    }
     out
 }
 
@@ -1794,15 +1800,27 @@ impl CommunicateTool {
         const BASE_DESCRIPTION: &str =
             "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
-        let description = if swarm_prompt.is_empty() {
+        let mut description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
             format!(
                 "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
             )
         };
+        if !swarm_model_overrides_allowed() {
+            description.push_str(
+                "\n\nModel/effort overrides are locked by agents.swarm_allow_override_model = false: the `model` and `effort` parameters are not available. Worker model and effort come from the `swarm_model`/`swarm_effort` config or coordinator inheritance.",
+            );
+        }
         Self { description }
     }
+}
+
+/// Whether swarm tool calls may carry per-call `model`/`effort` overrides.
+/// `[agents] swarm_allow_override_model` (default true) hides the parameters
+/// from the schema and rejects them at dispatch.
+fn swarm_model_overrides_allowed() -> bool {
+    crate::config::config().agents.swarm_allow_override_model
 }
 
 #[derive(Clone, Deserialize)]
@@ -2126,6 +2144,17 @@ impl Tool for CommunicateTool {
             }
         });
 
+        // When model overrides are locked, the schema must not advertise the
+        // parameters at all; dispatch still rejects stragglers below.
+        if !swarm_model_overrides_allowed()
+            && let Some(props) = schema
+                .get_mut("properties")
+                .and_then(|value| value.as_object_mut())
+        {
+            props.remove("model");
+            props.remove("effort");
+        }
+
         // Task-DAG properties are added after the macro to keep `json!` nesting
         // depth under the macro recursion limit.
         if let Some(props) = schema
@@ -2204,6 +2233,23 @@ impl Tool for CommunicateTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
+
+        // Defensive lock enforcement: a stale schema, hand-written call, or a
+        // model that ignores the hidden parameters must not sneak a model or
+        // effort override past `[agents] swarm_allow_override_model = false`.
+        // `model: "inherit"` counts as an override attempt since inheritance is
+        // already the default resolution.
+        if !swarm_model_overrides_allowed() {
+            if let Some(model) = params.model.as_deref()
+                && !model.trim().is_empty()
+            {
+                return Err(anyhow::anyhow!(
+                    "Per-call model overrides are disabled (agents.swarm_allow_override_model = false). Omit 'model' so workers use swarm_model config or inherit the coordinator's model."
+                ));
+            }
+            params.model = None;
+            params.effort = None;
+        }
 
         // `to_session` and `target_session` both name a single session id. Historically
         // different actions required different field names (e.g. `dm` wanted `to_session`

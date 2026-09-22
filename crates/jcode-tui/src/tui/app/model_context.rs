@@ -638,6 +638,19 @@ impl App {
         self.provider.available_efforts()
     }
 
+    /// Whether the active provider is a user-configured named compat profile
+    /// (`openai-compatible:<profile>`). Custom profiles declare no fixed effort
+    /// ladder, so `/effort <level>` accepts a typed canonical value instead of
+    /// restricting to a provider-advertised list.
+    pub(super) fn current_provider_is_custom_profile(&self) -> bool {
+        let name = if self.is_remote {
+            self.remote_provider_name.as_deref().unwrap_or_default()
+        } else {
+            self.provider.name()
+        };
+        name.starts_with("openai-compatible")
+    }
+
     pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
         let limit = if self.is_remote {
             // The server resolves its own per-model config (`context_window`,
@@ -1522,9 +1535,22 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         let current = app.provider.reasoning_effort();
         let efforts = app.provider.available_efforts();
         if efforts.is_empty() {
-            app.push_display_message(DisplayMessage::system(
-                "Reasoning effort not available for this provider.".to_string(),
-            ));
+            if app.current_provider_is_custom_profile() {
+                // Custom compat profiles declare no ladder: accept a typed
+                // canonical level instead of offering variant selection.
+                let current_label = current
+                    .as_deref()
+                    .map(effort_display_label)
+                    .unwrap_or("default");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Effort: {}\nThis provider does not declare an effort list; type any canonical level: none · minimal · low · medium · high · xhigh · max\nUse /effort <level> to change.",
+                    current_label,
+                )));
+            } else {
+                app.push_display_message(DisplayMessage::system(
+                    "Reasoning effort not available for this provider.".to_string(),
+                ));
+            }
         } else {
             let current_label = current
                 .as_deref()

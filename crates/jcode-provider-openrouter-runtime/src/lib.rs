@@ -1003,6 +1003,13 @@ impl OpenRouterProvider {
         ) {
             let effort = if effort == "max" { "xhigh" } else { effort };
             request["reasoning"] = serde_json::json!({"effort": effort});
+        } else if self.accepts_custom_reasoning_effort() {
+            // Named compat profiles without a declared ladder forward the
+            // canonical effort verbatim; the endpoint decides what to honor.
+            if effort == "none" {
+                return false;
+            }
+            request["reasoning_effort"] = serde_json::json!(effort);
         } else {
             return false;
         }
@@ -1115,6 +1122,19 @@ impl OpenRouterProvider {
         self.supports_deepseek_reasoning_effort()
             || self.supports_openai_reasoning_effort()
             || Self::profile_supports_unified_reasoning(
+                self.profile_id.as_deref(),
+                self.send_openrouter_headers,
+            )
+    }
+
+    /// Whether this runtime serves a user-configured named profile without a
+    /// declared effort ladder. Such profiles accept a typed canonical effort
+    /// (`none|minimal|low|medium|high|xhigh|max`, plus the swarm sentinels)
+    /// and forward it verbatim as an OpenAI-style `reasoning_effort` field,
+    /// letting the endpoint decide how to apply it.
+    pub(crate) fn accepts_custom_reasoning_effort(&self) -> bool {
+        self.profile_id.is_some()
+            && !Self::profile_supports_unified_reasoning(
                 self.profile_id.as_deref(),
                 self.send_openrouter_headers,
             )

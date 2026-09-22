@@ -1260,9 +1260,18 @@ async fn handle_remote_key_internal(
                         .unwrap_or("default");
                     let efforts = app.available_effort_names_for_current_model();
                     if efforts.is_empty() {
-                        app.push_display_message(DisplayMessage::system(
-                            "Reasoning effort not available for this provider.".to_string(),
-                        ));
+                        if app.current_provider_is_custom_profile() {
+                            // Custom compat profiles declare no ladder: accept
+                            // a typed canonical level.
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Effort: {}\nThis provider does not declare an effort list; type any canonical level: none · minimal · low · medium · high · xhigh · max\nUse /effort <level> to change.",
+                                label,
+                            )));
+                        } else {
+                            app.push_display_message(DisplayMessage::system(
+                                "Reasoning effort not available for this provider.".to_string(),
+                            ));
+                        }
                         return Ok(());
                     }
                     let list: Vec<String> = efforts
@@ -1291,7 +1300,37 @@ async fn handle_remote_key_internal(
                         return Ok(());
                     }
                     let efforts = app.available_effort_names_for_current_model();
-                    if efforts.iter().any(|effort| *effort == level) {
+                    if efforts.is_empty() && !app.current_provider_is_custom_profile() {
+                        // No declared ladder and not a custom profile: forward
+                        // to the server and let the provider validate, as
+                        // before.
+                        remote.set_reasoning_effort(level).await?;
+                        return Ok(());
+                    }
+                    // Custom compat profiles declare no fixed ladder, so accept
+                    // a typed canonical level (or a swarm mode) instead of
+                    // restricting to provider-advertised values. Models with a
+                    // declared ladder stay ladder-restricted.
+                    let valid = if efforts.is_empty() {
+                        app.current_provider_is_custom_profile()
+                            && (jcode_provider_core::canonical_reasoning_effort(level).is_some()
+                                || crate::prompt::is_swarm_effort(level))
+                    } else {
+                        efforts.iter().any(|effort| *effort == level)
+                    };
+                    if !valid {
+                        let allowed = if efforts.is_empty() {
+                            "none · minimal · low · medium · high · xhigh · max".to_string()
+                        } else {
+                            efforts.join(" · ")
+                        };
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Unknown effort '{}'. Available: {}",
+                            level, allowed
+                        )));
+                        return Ok(());
+                    }
+                    {
                         app.remote_reasoning_effort = Some(level.to_string());
                         app.invalidate_model_picker_cache();
                         app.set_status_notice(format!(

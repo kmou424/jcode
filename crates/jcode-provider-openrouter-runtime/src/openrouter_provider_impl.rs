@@ -443,7 +443,7 @@ impl Provider for OpenRouterProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        if !self.supports_any_reasoning_effort() {
+        if !self.supports_any_reasoning_effort() && !self.accepts_custom_reasoning_effort() {
             return None;
         }
         self.reasoning_effort
@@ -454,6 +454,28 @@ impl Provider for OpenRouterProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
+            if self.accepts_custom_reasoning_effort() {
+                // Named compat profiles do not declare a fixed effort ladder;
+                // validate the typed value against the canonical levels (plus
+                // the UI swarm sentinels) and store it verbatim.
+                let requested = effort.trim().to_ascii_lowercase();
+                let canonical = if jcode_base::prompt::is_swarm_effort(&requested) {
+                    Some(requested.as_str())
+                } else {
+                    jcode_provider_core::canonical_reasoning_effort(&requested)
+                };
+                if !requested.is_empty() && canonical.is_none() {
+                    anyhow::bail!(
+                        "Reasoning effort '{}' is not a known effort level (valid: none, minimal, low, medium, high, xhigh, max)",
+                        effort.trim()
+                    );
+                }
+                let mut current = self.reasoning_effort.try_write().map_err(|_| {
+                    anyhow::anyhow!("Cannot change reasoning effort while a request is in progress")
+                })?;
+                *current = canonical.map(str::to_string);
+                return Ok(());
+            }
             anyhow::bail!(
                 "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family and GPT-family reasoning models, and profiles with supports_reasoning_effort = true."
             );

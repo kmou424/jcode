@@ -621,6 +621,13 @@ pub struct AgentsConfig {
     /// call does not pass an explicit `effort`. Leave unset to let workers
     /// inherit the provider-wide reasoning effort.
     pub swarm_effort: Option<String>,
+    /// Whether the `swarm` tool may accept per-call `model`/`effort`
+    /// overrides. When false, the tool schema hides both parameters and the
+    /// dispatch rejects an explicit `model` (including `"inherit"`) and drops
+    /// `effort`, so `swarm_model`/`swarm_effort` are the only way to steer
+    /// worker model selection. Defaults to true.
+    #[serde(default = "default_true")]
+    pub swarm_allow_override_model: bool,
     /// Root reasoning effort in light swarm mode. Unset or invalid means `max`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
@@ -724,6 +731,7 @@ impl Default for AgentsConfig {
         Self {
             swarm_model: None,
             swarm_effort: None,
+            swarm_allow_override_model: true,
             swarm_root_effort: None,
             swarm_deep_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
