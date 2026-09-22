@@ -227,10 +227,147 @@ fn test_parse_no_begin() {
 }
 
 #[test]
+fn test_parse_add_file_rejects_unprefixed_content() {
+    // Content lines without the '+' prefix must fail loudly instead of
+    // silently producing an empty file (codex parity).
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\nHello world\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("line 3"), "{err}");
+    assert!(err.contains("'+'"), "{err}");
+}
+
+#[test]
+fn test_parse_add_file_rejects_unknown_directive() {
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\n+ok\n*** Bogus Directive\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("not a valid hunk header"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_missing_end_patch() {
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\n+content";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("*** End Patch"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_trailing_garbage() {
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\n+content\n*** End Patch\noops";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("*** End Patch"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_preamble_garbage() {
+    let patch = "sure, here is your patch:\n*** Begin Patch\n*** Add File: hello.txt\n+content\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("*** Begin Patch"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_garbage_between_hunks() {
+    let patch = "*** Begin Patch\n*** Delete File: a.txt\nthis is not a hunk\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("not a valid hunk header"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_empty_update_hunk() {
+    let patch = "*** Begin Patch\n*** Update File: test.py\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("is empty"), "{err}");
+    assert!(err.contains("test.py"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_update_hunk_with_empty_chunk() {
+    // `@@` opens a chunk but no diff lines follow before End Patch.
+    let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("does not contain any lines"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_consecutive_context_markers() {
+    let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n@@ foo\n-a\n+b\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("Unexpected line"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_stray_line_in_update_hunk() {
+    let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n-a\n+b\ngarbage\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("@@ context marker"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_move_to_after_chunks() {
+    let patch = "*** Begin Patch\n*** Update File: a.py\n@@\n-x\n+y\n*** Move to: b.py\n@@\n-p\n+q\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("invalid hunk"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_line_after_end_of_file_chunk() {
+    // After `*** End of File` the next chunk must open with `@@`.
+    let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n-a\n+b\n*** End of File\n+more\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("@@ context marker"), "{err}");
+}
+
+#[test]
+fn test_parse_rejects_blank_line_inside_add_hunk() {
+    // A blank line is not a '+' line and previously ended the hunk silently.
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\n+one\n\n+two\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("'+'"), "{err}");
+}
+
+#[test]
 fn test_parse_heredoc_wrapper() {
     let patch = "<<'EOF'\n*** Begin Patch\n*** Add File: test.txt\n+hello\n*** End Patch\nEOF";
     let hunks = parse_apply_patch(patch).unwrap();
     assert_eq!(hunks.len(), 1);
+}
+
+#[test]
+fn test_parse_environment_id_accepted_and_ignored() {
+    // Codex parity: `*** Environment ID:` is legal right after Begin Patch.
+    // jcode applies to one environment, so the value is validated and dropped.
+    let patch = "*** Begin Patch\n*** Environment ID: production\n*** Add File: hello.txt\n+hi\n*** End Patch";
+    let hunks = parse_apply_patch(patch).unwrap();
+    assert_eq!(hunks.len(), 1);
+    match &hunks[0] {
+        PatchHunk::AddFile { path, contents } => {
+            assert_eq!(path, "hello.txt");
+            assert_eq!(contents, "hi\n");
+        }
+        _ => panic!("Expected AddFile"),
+    }
+}
+
+#[test]
+fn test_parse_environment_id_rejects_duplicates() {
+    let patch = "*** Begin Patch\n*** Environment ID: a\n*** Environment ID: b\n*** Add File: x\n+y\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("more than once"), "{err}");
+}
+
+#[test]
+fn test_parse_environment_id_rejects_empty_value() {
+    let patch = "*** Begin Patch\n*** Environment ID:   \n*** Add File: x\n+y\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("cannot be empty"), "{err}");
+}
+
+#[test]
+fn test_parse_environment_id_rejected_inside_hunk() {
+    // The marker is only valid in StartedPatch position; inside a hunk it is
+    // an invalid line.
+    let patch = "*** Begin Patch\n*** Add File: x\n+y\n*** Environment ID: z\n*** End Patch";
+    let err = parse_apply_patch(patch).unwrap_err().to_string();
+    assert!(err.contains("invalid hunk"), "{err}");
 }
 
 #[test]

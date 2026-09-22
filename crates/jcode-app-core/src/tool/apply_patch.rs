@@ -313,7 +313,44 @@ async fn apply_patch_text(
                                     )
                                     .await;
                                 }
+                                publish_file_touch(
+                                    &ctx, &resolved, path, "modified", &diff, intent,
+                                );
+                                publish_file_touch(
+                                    &ctx,
+                                    &dest_resolved,
+                                    dest,
+                                    "modified",
+                                    &diff,
+                                    intent,
+                                );
+                                touched_paths.push(path.clone());
+                                touched_paths.push(dest.clone());
+                                if diff.is_empty() {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks), moved to {}",
+                                        path,
+                                        chunks.len(),
+                                        dest
+                                    ));
+                                } else {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks), moved to {}\n{}",
+                                        path,
+                                        chunks.len(),
+                                        dest,
+                                        diff
+                                    ));
+                                }
+                                // Codex classifies a move as `M <source>` — the
+                                // source path is pushed for both branches.
+                                modified_paths.push(path.clone());
                             } else {
+                                // The destination write already happened, so
+                                // the stats reflect it, but the move is a
+                                // failure: codex reports "Failed to remove
+                                // original" rather than claiming a move that
+                                // left a duplicate behind.
                                 super::edit_stats::record(
                                     &ctx,
                                     dest_old.as_deref().unwrap_or(""),
@@ -321,33 +358,20 @@ async fn apply_patch_text(
                                     dest_existed && dest_old.is_none(),
                                 )
                                 .await;
-                            }
-                            publish_file_touch(&ctx, &resolved, path, "modified", &diff, intent);
-                            publish_file_touch(
-                                &ctx,
-                                &dest_resolved,
-                                dest,
-                                "modified",
-                                &diff,
-                                intent,
-                            );
-                            touched_paths.push(path.clone());
-                            touched_paths.push(dest.clone());
-                            if diff.is_empty() {
-                                results.push(format!(
-                                    "✓ {}: modified ({} hunks), moved to {}",
-                                    path,
-                                    chunks.len(),
-                                    dest
-                                ));
-                            } else {
-                                results.push(format!(
-                                    "✓ {}: modified ({} hunks), moved to {}\n{}",
-                                    path,
-                                    chunks.len(),
+                                publish_file_touch(
+                                    &ctx,
+                                    &dest_resolved,
                                     dest,
-                                    diff
-                                ));
+                                    "modified",
+                                    &diff,
+                                    intent,
+                                );
+                                touched_paths.push(dest.clone());
+                                let failure = format!(
+                                    "{path}: failed to remove original after writing {dest}"
+                                );
+                                failure_lines.push(failure.clone());
+                                results.push(format!("✗ {failure}"));
                             }
                         } else {
                             tokio::fs::write(&resolved, &new_contents).await?;
@@ -369,10 +393,9 @@ async fn apply_patch_text(
                                     diff
                                 ));
                             }
+                            // Codex classifies a plain update as `M <path>`.
+                            modified_paths.push(path.clone());
                         }
-                        // Codex classifies a move as `M <source>` — the
-                        // source path is pushed for both branches.
-                        modified_paths.push(path.clone());
                     }
                     Err(e) => {
                         failure_lines.push(format!("{}: {}", path, e));
@@ -744,166 +767,446 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
     None
 }
 
-fn parse_apply_patch(input: &str) -> Result<Vec<PatchHunk>> {
-    let lines: Vec<&str> = input.lines().collect();
+/// Parser modes, mirroring codex's `StreamingParserMode` so the accepted
+/// grammar and the rejection behavior match codex's apply_patch exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchParseMode {
+    NotStarted,
+    StartedPatch,
+    AddFile,
+    DeleteFile,
+    UpdateFile { hunk_line_number: usize },
+    EndedPatch,
+}
 
-    let start = lines
-        .iter()
-        .position(|l| l.trim() == "*** Begin Patch")
-        .ok_or_else(|| anyhow::anyhow!("Patch must contain *** Begin Patch"))?;
+const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
+const END_PATCH_MARKER: &str = "*** End Patch";
+const ADD_FILE_MARKER: &str = "*** Add File: ";
+const DELETE_FILE_MARKER: &str = "*** Delete File: ";
+const UPDATE_FILE_MARKER: &str = "*** Update File: ";
+const MOVE_TO_MARKER: &str = "*** Move to: ";
+const EOF_MARKER: &str = "*** End of File";
+const ENVIRONMENT_ID_MARKER: &str = "*** Environment ID:";
+const CHANGE_CONTEXT_MARKER: &str = "@@ ";
+const EMPTY_CHANGE_CONTEXT_MARKER: &str = "@@";
 
-    let mut hunks = Vec::new();
-    let mut i = start + 1;
+fn invalid_hunk(line_number: usize, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("invalid hunk at line {line_number}, {message}")
+}
 
-    while i < lines.len() {
-        let line = lines[i].trim_end();
-        if line.trim() == "*** End Patch" {
-            break;
+fn invalid_hunk_header(line_number: usize, line: &str) -> anyhow::Error {
+    invalid_hunk(
+        line_number,
+        format!(
+            "'{line}' is not a valid hunk header. Valid hunk headers: \
+             '*** Add File: {{path}}', '*** Delete File: {{path}}', \
+             '*** Update File: {{path}}'"
+        ),
+    )
+}
+
+fn unexpected_update_line(line_number: usize, line: &str) -> anyhow::Error {
+    invalid_hunk(
+        line_number,
+        format!(
+            "Unexpected line found in update hunk: '{line}'. Every line should \
+             start with ' ' (context line), '+' (added line), or '-' (removed line)"
+        ),
+    )
+}
+
+/// A hunk header or `*** End Patch` arriving while the previous update hunk
+/// has no chunks (or an empty trailing chunk) is a parse error in codex, not
+/// a silent hunk boundary.
+fn ensure_update_hunk_is_not_empty(
+    hunks: &[PatchHunk],
+    mode: PatchParseMode,
+    line: &str,
+    line_number: usize,
+) -> Result<()> {
+    if let Some(PatchHunk::UpdateFile { path, chunks, .. }) = hunks.last() {
+        if chunks.is_empty()
+            && let PatchParseMode::UpdateFile { hunk_line_number } = mode
+        {
+            return Err(invalid_hunk(
+                hunk_line_number,
+                format!("Update file hunk for path '{path}' is empty"),
+            ));
         }
+        if chunks
+            .last()
+            .is_some_and(|chunk| chunk.old_lines.is_empty() && chunk.new_lines.is_empty())
+        {
+            if line == END_PATCH_MARKER {
+                return Err(invalid_hunk(
+                    line_number,
+                    "Update hunk does not contain any lines",
+                ));
+            }
+            return Err(unexpected_update_line(line_number, line));
+        }
+    }
+    Ok(())
+}
 
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            let path = path.trim().to_string();
-            i += 1;
-            let mut contents = String::new();
-            while i < lines.len() {
-                let current = lines[i];
-                if current.starts_with("*** ") {
-                    break;
+/// Returns true when `trimmed` was consumed as a hunk header or `*** End
+/// Patch`, pushing the new hunk / updating `mode` as codex does.
+fn handle_hunk_headers_and_end_patch(
+    hunks: &mut Vec<PatchHunk>,
+    mode: &mut PatchParseMode,
+    environment_id: &mut Option<String>,
+    trimmed: &str,
+    line_number: usize,
+) -> Result<bool> {
+    // Codex parity: `*** Environment ID:` is legal once, right after
+    // `*** Begin Patch`. jcode is a single-environment tool so the value is
+    // validated then discarded; rejecting a legal codex patch here would be a
+    // parse regression.
+    if matches!(*mode, PatchParseMode::StartedPatch)
+        && let Some(value) = trimmed.strip_prefix(ENVIRONMENT_ID_MARKER)
+    {
+        if environment_id.is_some() {
+            anyhow::bail!(
+                "invalid patch: apply_patch environment_id cannot be specified more than once"
+            );
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            anyhow::bail!("invalid patch: apply_patch environment_id cannot be empty");
+        }
+        *environment_id = Some(value.to_string());
+        return Ok(true);
+    }
+    if trimmed == END_PATCH_MARKER {
+        ensure_update_hunk_is_not_empty(hunks, *mode, trimmed, line_number)?;
+        *mode = PatchParseMode::EndedPatch;
+        return Ok(true);
+    }
+    if let Some(path) = trimmed.strip_prefix(ADD_FILE_MARKER) {
+        ensure_update_hunk_is_not_empty(hunks, *mode, trimmed, line_number)?;
+        hunks.push(PatchHunk::AddFile {
+            path: path.trim().to_string(),
+            contents: String::new(),
+        });
+        *mode = PatchParseMode::AddFile;
+        return Ok(true);
+    }
+    if let Some(path) = trimmed.strip_prefix(DELETE_FILE_MARKER) {
+        ensure_update_hunk_is_not_empty(hunks, *mode, trimmed, line_number)?;
+        hunks.push(PatchHunk::DeleteFile {
+            path: path.trim().to_string(),
+        });
+        *mode = PatchParseMode::DeleteFile;
+        return Ok(true);
+    }
+    if let Some(path) = trimmed.strip_prefix(UPDATE_FILE_MARKER) {
+        ensure_update_hunk_is_not_empty(hunks, *mode, trimmed, line_number)?;
+        hunks.push(PatchHunk::UpdateFile {
+            path: path.trim().to_string(),
+            move_to: None,
+            chunks: Vec::new(),
+        });
+        *mode = PatchParseMode::UpdateFile {
+            hunk_line_number: line_number,
+        };
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Verifies the first and last lines are the patch envelope markers, like
+/// codex's strict boundary check. On failure, retries once after unwrapping
+/// a `<<EOF`/`EOF` heredoc, matching codex's lenient mode for shell-invoked
+/// patches.
+fn check_patch_boundaries<'a>(lines: &'a [&'a str]) -> Result<&'a [&'a str]> {
+    match check_start_and_end_lines(lines) {
+        Ok(()) => Ok(lines),
+        Err(original_error) => {
+            if let [first, .., last] = lines
+                && (*first == "<<EOF" || *first == "<<'EOF'" || *first == "<<\"EOF\"")
+                && last.ends_with("EOF")
+                && lines.len() >= 4
+            {
+                let inner = &lines[1..lines.len() - 1];
+                return check_start_and_end_lines(inner).map(|()| inner);
+            }
+            Err(original_error)
+        }
+    }
+}
+
+fn check_start_and_end_lines(lines: &[&str]) -> Result<()> {
+    let first = lines.first().map(|line| line.trim());
+    let last = lines.last().map(|line| line.trim());
+    match (first, last) {
+        (Some(first), Some(last)) if first == BEGIN_PATCH_MARKER && last == END_PATCH_MARKER => {
+            Ok(())
+        }
+        (Some(first), _) if first != BEGIN_PATCH_MARKER => {
+            anyhow::bail!("invalid patch: The first line of the patch must be '*** Begin Patch'")
+        }
+        _ => anyhow::bail!("invalid patch: The last line of the patch must be '*** End Patch'"),
+    }
+}
+
+fn parse_apply_patch(input: &str) -> Result<Vec<PatchHunk>> {
+    let all_lines: Vec<&str> = input.trim().lines().collect();
+    let lines = check_patch_boundaries(&all_lines)?;
+
+    let mut hunks: Vec<PatchHunk> = Vec::new();
+    let mut mode = PatchParseMode::NotStarted;
+    // Parsed for codex parity and discarded: jcode applies to one environment.
+    let mut environment_id: Option<String> = None;
+
+    for (index, raw_line) in lines.iter().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let trimmed = line.trim();
+
+        match mode {
+            PatchParseMode::NotStarted => {
+                if trimmed == BEGIN_PATCH_MARKER {
+                    mode = PatchParseMode::StartedPatch;
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "invalid patch: The first line of the patch must be '*** Begin Patch'"
+                    ));
                 }
-                if let Some(added) = current.strip_prefix('+') {
+            }
+            PatchParseMode::StartedPatch => {
+                if !handle_hunk_headers_and_end_patch(
+                    &mut hunks,
+                    &mut mode,
+                    &mut environment_id,
+                    trimmed,
+                    line_number,
+                )? {
+                    return Err(invalid_hunk_header(line_number, trimmed));
+                }
+            }
+            PatchParseMode::AddFile => {
+                if handle_hunk_headers_and_end_patch(
+                    &mut hunks,
+                    &mut mode,
+                    &mut environment_id,
+                    trimmed,
+                    line_number,
+                )? {
+                    continue;
+                }
+                if let Some(added) = line.strip_prefix('+')
+                    && let Some(PatchHunk::AddFile { contents, .. }) = hunks.last_mut()
+                {
                     contents.push_str(added);
                     contents.push('\n');
+                    continue;
                 }
-                i += 1;
-            }
-            hunks.push(PatchHunk::AddFile { path, contents });
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            hunks.push(PatchHunk::DeleteFile {
-                path: path.trim().to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
-            let path = path.trim().to_string();
-            i += 1;
-
-            let mut move_to = None;
-            if i < lines.len()
-                && let Some(target) = lines[i].trim_end().strip_prefix("*** Move to: ")
-            {
-                move_to = Some(target.trim().to_string());
-                i += 1;
-            }
-
-            let mut chunks = Vec::new();
-            let mut is_first_chunk = true;
-
-            while i < lines.len() {
-                let current = lines[i].trim_end();
-
-                if current.starts_with("*** ") && current != "*** End of File" {
-                    break;
+                // A bare content line used to be skipped silently, which
+                // turned a malformed patch into an empty file that still
+                // reported success.
+                if trimmed.starts_with("*** ") {
+                    return Err(invalid_hunk_header(line_number, trimmed));
                 }
-
-                if current.trim().is_empty()
-                    && !current.starts_with(' ')
-                    && !current.starts_with('+')
-                    && !current.starts_with('-')
-                {
-                    i += 1;
+                return Err(invalid_hunk(
+                    line_number,
+                    format!(
+                        "'{trimmed}' is not a valid line in an Add File hunk: \
+                         every added line must start with '+'"
+                    ),
+                ));
+            }
+            PatchParseMode::DeleteFile => {
+                if !handle_hunk_headers_and_end_patch(
+                    &mut hunks,
+                    &mut mode,
+                    &mut environment_id,
+                    trimmed,
+                    line_number,
+                )? {
+                    return Err(invalid_hunk_header(line_number, trimmed));
+                }
+            }
+            PatchParseMode::UpdateFile { hunk_line_number } => {
+                let update_line = line.trim_end();
+                if handle_hunk_headers_and_end_patch(
+                    &mut hunks,
+                    &mut mode,
+                    &mut environment_id,
+                    update_line,
+                    line_number,
+                )? {
                     continue;
                 }
 
-                let change_context;
-                if current == "@@" {
-                    change_context = None;
-                    i += 1;
-                } else if let Some(ctx) = current.strip_prefix("@@ ") {
-                    change_context = Some(ctx.to_string());
-                    i += 1;
-                } else if is_first_chunk {
-                    change_context = None;
-                } else {
-                    break;
-                }
+                let Some(PatchHunk::UpdateFile {
+                    move_to, chunks, ..
+                }) = hunks.last_mut()
+                else {
+                    return Err(invalid_hunk(line_number, "update hunk state is missing"));
+                };
 
-                let mut old_lines = Vec::new();
-                let mut new_lines = Vec::new();
-                let mut is_end_of_file = false;
-                let mut had_diff_lines = false;
-
-                while i < lines.len() {
-                    let cl = lines[i];
-
-                    if cl == "*** End of File" {
-                        is_end_of_file = true;
-                        i += 1;
-                        break;
-                    }
-
-                    if cl.starts_with("*** ") || cl.starts_with("@@") {
-                        break;
-                    }
-
-                    if let Some(content) = cl.strip_prefix(' ') {
-                        old_lines.push(content.to_string());
-                        new_lines.push(content.to_string());
-                        had_diff_lines = true;
-                    } else if let Some(content) = cl.strip_prefix('+') {
-                        new_lines.push(content.to_string());
-                        had_diff_lines = true;
-                    } else if let Some(content) = cl.strip_prefix('-') {
-                        old_lines.push(content.to_string());
-                        had_diff_lines = true;
-                    } else if cl.is_empty() {
-                        old_lines.push(String::new());
-                        new_lines.push(String::new());
-                        had_diff_lines = true;
-                    } else {
-                        if had_diff_lines {
-                            break;
-                        }
-                        i += 1;
+                if chunks.last().is_some_and(|chunk| chunk.is_end_of_file) {
+                    if update_line.is_empty() {
                         continue;
                     }
-
-                    i += 1;
+                    if update_line != EMPTY_CHANGE_CONTEXT_MARKER
+                        && !update_line.starts_with(CHANGE_CONTEXT_MARKER)
+                    {
+                        return Err(invalid_hunk(
+                            line_number,
+                            format!(
+                                "Expected update hunk to start with a @@ context marker, \
+                                 got: '{line}'"
+                            ),
+                        ));
+                    }
                 }
 
-                if had_diff_lines || change_context.is_some() {
+                if chunks.is_empty()
+                    && move_to.is_none()
+                    && let Some(dest) = update_line.strip_prefix(MOVE_TO_MARKER)
+                {
+                    *move_to = Some(dest.trim().to_string());
+                    mode = PatchParseMode::UpdateFile { hunk_line_number };
+                    continue;
+                }
+
+                if (update_line == EMPTY_CHANGE_CONTEXT_MARKER
+                    || update_line.starts_with(CHANGE_CONTEXT_MARKER))
+                    && chunks.last().is_some_and(|chunk| {
+                        chunk.old_lines.is_empty() && chunk.new_lines.is_empty()
+                    })
+                {
+                    return Err(unexpected_update_line(line_number, line));
+                }
+
+                if update_line == EMPTY_CHANGE_CONTEXT_MARKER {
                     chunks.push(UpdateFileChunk {
-                        change_context,
-                        old_lines,
-                        new_lines,
-                        is_end_of_file,
+                        change_context: None,
+                        old_lines: Vec::new(),
+                        new_lines: Vec::new(),
+                        is_end_of_file: false,
                     });
+                    continue;
                 }
 
-                is_first_chunk = false;
-            }
+                if let Some(change_context) = update_line.strip_prefix(CHANGE_CONTEXT_MARKER) {
+                    chunks.push(UpdateFileChunk {
+                        change_context: Some(change_context.to_string()),
+                        old_lines: Vec::new(),
+                        new_lines: Vec::new(),
+                        is_end_of_file: false,
+                    });
+                    continue;
+                }
 
-            if chunks.is_empty() {
-                anyhow::bail!("Update file hunk for '{}' has no changes", path);
-            }
+                if update_line == EOF_MARKER {
+                    if chunks.last().is_some_and(|chunk| {
+                        chunk.old_lines.is_empty() && chunk.new_lines.is_empty()
+                    }) {
+                        return Err(invalid_hunk(
+                            line_number,
+                            "Update hunk does not contain any lines",
+                        ));
+                    }
+                    if let Some(chunk) = chunks.last_mut() {
+                        chunk.is_end_of_file = true;
+                    }
+                    continue;
+                }
 
-            hunks.push(PatchHunk::UpdateFile {
-                path,
-                move_to,
-                chunks,
-            });
-            continue;
+                if line.is_empty() {
+                    if chunks.is_empty() {
+                        chunks.push(UpdateFileChunk {
+                            change_context: None,
+                            old_lines: Vec::new(),
+                            new_lines: Vec::new(),
+                            is_end_of_file: false,
+                        });
+                    }
+                    if let Some(chunk) = chunks.last_mut() {
+                        chunk.old_lines.push(String::new());
+                        chunk.new_lines.push(String::new());
+                    }
+                    continue;
+                }
+
+                if let Some(content) = line.strip_prefix(' ') {
+                    if chunks.is_empty() {
+                        chunks.push(UpdateFileChunk {
+                            change_context: None,
+                            old_lines: Vec::new(),
+                            new_lines: Vec::new(),
+                            is_end_of_file: false,
+                        });
+                    }
+                    if let Some(chunk) = chunks.last_mut() {
+                        chunk.old_lines.push(content.to_string());
+                        chunk.new_lines.push(content.to_string());
+                    }
+                    continue;
+                }
+
+                if let Some(content) = line.strip_prefix('+') {
+                    if chunks.is_empty() {
+                        chunks.push(UpdateFileChunk {
+                            change_context: None,
+                            old_lines: Vec::new(),
+                            new_lines: Vec::new(),
+                            is_end_of_file: false,
+                        });
+                    }
+                    if let Some(chunk) = chunks.last_mut() {
+                        chunk.new_lines.push(content.to_string());
+                    }
+                    continue;
+                }
+
+                if let Some(content) = line.strip_prefix('-') {
+                    if chunks.is_empty() {
+                        chunks.push(UpdateFileChunk {
+                            change_context: None,
+                            old_lines: Vec::new(),
+                            new_lines: Vec::new(),
+                            is_end_of_file: false,
+                        });
+                    }
+                    if let Some(chunk) = chunks.last_mut() {
+                        chunk.old_lines.push(content.to_string());
+                    }
+                    continue;
+                }
+
+                if chunks
+                    .last()
+                    .is_some_and(|chunk| !chunk.old_lines.is_empty() || !chunk.new_lines.is_empty())
+                {
+                    return Err(invalid_hunk(
+                        line_number,
+                        format!(
+                            "Expected update hunk to start with a @@ context marker, \
+                             got: '{line}'"
+                        ),
+                    ));
+                }
+                return Err(unexpected_update_line(line_number, line));
+            }
+            PatchParseMode::EndedPatch => {
+                if !trimmed.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "invalid patch: The last line of the patch must be '*** End Patch'"
+                    ));
+                }
+            }
         }
+    }
 
-        i += 1;
+    if !matches!(mode, PatchParseMode::EndedPatch) {
+        anyhow::bail!("invalid patch: The last line of the patch must be '*** End Patch'");
     }
 
     if hunks.is_empty() {
-        anyhow::bail!("No valid patch directives found");
+        anyhow::bail!("invalid patch: no hunks found");
     }
 
     Ok(hunks)
