@@ -1327,12 +1327,46 @@ mod tests {
         fn new() -> Self {
             let lock = crate::storage::lock_test_env();
             let temp = tempfile::tempdir().expect("tempdir");
-            let vars = vec![
-                ("JCODE_HOME", std::env::var_os("JCODE_HOME")),
-                ("OPENCODE_API_KEY", std::env::var_os("OPENCODE_API_KEY")),
-            ];
+            let vars: Vec<(&'static str, Option<std::ffi::OsString>)> = [
+                "JCODE_HOME",
+                "OPENCODE_API_KEY",
+                "JCODE_NAMED_PROVIDER_PROFILE",
+                "JCODE_PROVIDER_PROFILE_ACTIVE",
+                "JCODE_PROVIDER_PROFILE_NAME",
+                "JCODE_RUNTIME_PROVIDER",
+                "JCODE_OPENROUTER_API_BASE",
+                "JCODE_OPENROUTER_API_KEY_NAME",
+                "JCODE_OPENROUTER_ENV_FILE",
+                "JCODE_OPENROUTER_CACHE_NAMESPACE",
+                "JCODE_OPENROUTER_PROVIDER_FEATURES",
+                "JCODE_OPENROUTER_TRANSPORT_STATE",
+                "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+                "JCODE_OPENROUTER_MODEL_CATALOG",
+                "JCODE_OPENROUTER_MODEL",
+                "JCODE_OPENROUTER_STATIC_MODELS",
+                "JCODE_OPENROUTER_AUTH_HEADER",
+                "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+                "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+                "JCODE_OPENROUTER_PROVIDER",
+                "JCODE_OPENROUTER_NO_FALLBACK",
+                "JCODE_OPENAI_COMPAT_API_BASE",
+                "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+                "JCODE_OPENAI_COMPAT_ENV_FILE",
+                "JCODE_OPENAI_COMPAT_SETUP_URL",
+                "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+                "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+                "OPENAI_COMPAT_API_KEY",
+                "JCODE_DEFERRED_AUTH_BOOTSTRAP",
+                "JCODE_MEMORY_JEV_PROVIDER",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
             crate::env::set_var("JCODE_HOME", temp.path());
             crate::env::set_var("OPENCODE_API_KEY", "sk-test-opencode");
+            for (key, _) in vars.iter().skip(2) {
+                crate::env::remove_var(key);
+            }
             Self {
                 vars,
                 _temp: temp,

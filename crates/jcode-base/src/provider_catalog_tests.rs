@@ -89,7 +89,51 @@ impl EnvGuard {
             .collect();
         Self { vars }
     }
+
+    /// Save `keys` for restore on drop, then remove them so ambient values
+    /// from the developer's environment cannot leak into the test.
+    fn save_and_clear(keys: &[&'static str]) -> Self {
+        let guard = Self::save(keys);
+        for key in keys {
+            crate::env::remove_var(key);
+        }
+        guard
+    }
 }
+
+/// Provider/profile env vars that pollute catalog resolution when a developer
+/// exports them (e.g. JCODE_NAMED_PROVIDER_PROFILE). Tests that exercise
+/// profile resolution clear these via `EnvGuard::save_and_clear`.
+const AMBIENT_PROVIDER_ENV_VARS: &[&str] = &[
+    "JCODE_NAMED_PROVIDER_PROFILE",
+    "JCODE_PROVIDER_PROFILE_ACTIVE",
+    "JCODE_PROVIDER_PROFILE_NAME",
+    "JCODE_RUNTIME_PROVIDER",
+    "JCODE_OPENROUTER_API_BASE",
+    "JCODE_OPENROUTER_API_KEY_NAME",
+    "JCODE_OPENROUTER_ENV_FILE",
+    "JCODE_OPENROUTER_CACHE_NAMESPACE",
+    "JCODE_OPENROUTER_PROVIDER_FEATURES",
+    "JCODE_OPENROUTER_TRANSPORT_STATE",
+    "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+    "JCODE_OPENROUTER_MODEL_CATALOG",
+    "JCODE_OPENROUTER_MODEL",
+    "JCODE_OPENROUTER_STATIC_MODELS",
+    "JCODE_OPENROUTER_AUTH_HEADER",
+    "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+    "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+    "JCODE_OPENROUTER_PROVIDER",
+    "JCODE_OPENROUTER_NO_FALLBACK",
+    "JCODE_OPENAI_COMPAT_API_BASE",
+    "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+    "JCODE_OPENAI_COMPAT_ENV_FILE",
+    "JCODE_OPENAI_COMPAT_SETUP_URL",
+    "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+    "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+    "OPENAI_COMPAT_API_KEY",
+    "JCODE_DEFERRED_AUTH_BOOTSTRAP",
+    "JCODE_MEMORY_JEV_PROVIDER",
+];
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
@@ -1015,12 +1059,7 @@ fn matrix_openai_compatible_profile_overrides_read_from_env_file() {
 #[test]
 fn matrix_openai_compatible_localhost_override_allows_no_auth() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-    ]);
+    let _guard = EnvGuard::save_and_clear(AMBIENT_PROVIDER_ENV_VARS);
 
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", "http://localhost:11434/v1");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_API_KEY_NAME");
