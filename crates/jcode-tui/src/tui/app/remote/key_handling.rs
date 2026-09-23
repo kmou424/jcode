@@ -342,6 +342,28 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.copy_selection_mode {
+        // Same contract as the local `handle_modal_key` path: Ctrl+C/D in
+        // copy mode copies the selection when one exists; with no
+        // selection it falls through to the global interrupt/quit chords
+        // (issue #497 — copying an error must never quit jcode).
+        let copy_quit_chord = modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'));
+        if !copy_quit_chord {
+            let _ = app.handle_copy_selection_key(code, modifiers)
+                || input::handle_navigation_shortcuts(app, code, modifiers);
+            return Ok(());
+        }
+        if code == KeyCode::Char('c')
+            && app
+                .current_copy_selection_text()
+                .is_some_and(|text| !text.is_empty())
+        {
+            app.copy_current_selection_to_clipboard();
+            return Ok(());
+        }
+    }
+
     // The blocking ask_user_question questionnaire owns input while open
     // it takes precedence over pickers because it is what the
     // session is waiting on. Its answer is staged into
