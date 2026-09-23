@@ -655,6 +655,12 @@ pub struct AgentsConfig {
     pub memory_jev_threshold: f32,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
+    /// Optional reasoning effort override for the memory sidecar (e.g.
+    /// `"none"`, `"low"`). Applies to the OpenAI backend and to
+    /// `<providers.name>:<model>` provider-routed specs; the dedicated Claude
+    /// backend (haiku) has no reasoning surface and ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_reasoning_effort: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
     /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
@@ -740,6 +746,7 @@ impl Default for AgentsConfig {
             memory_jev_provider: default_memory_jev_provider(),
             memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
+            memory_reasoning_effort: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),

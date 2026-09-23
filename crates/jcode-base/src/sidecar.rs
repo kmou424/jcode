@@ -164,25 +164,97 @@ impl Sidecar {
             match crate::provider::provider_for_model(&model) {
                 Some("openai") => (SidecarBackend::OpenAI, model, None),
                 Some("claude") => (SidecarBackend::Claude, model, None),
-                _ => {
-                    crate::logging::warn(&format!(
-                        "Ignoring unsupported memory sidecar model override '{}'; expected an OpenAI or Claude model",
-                        model
-                    ));
-                    Self::auto_select_backend()
-                }
+                _ => Self::named_provider_or_auto(model),
             }
         } else {
             Self::auto_select_backend()
         };
 
-        Self {
+        let mut sidecar = Self {
             client: crate::provider::shared_http_client(),
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
             backend,
             provider,
             reasoning_override: None,
+        };
+        sidecar.apply_configured_reasoning_effort();
+        sidecar
+    }
+
+    /// Route a `<providers-name>:<model>` spec through a fork of the live
+    /// provider so memory extraction can be pinned to any configured named
+    /// provider instead of the session's active one. Anything else keeps the
+    /// historical warn-and-auto-select behavior.
+    fn named_provider_or_auto(
+        model: String,
+    ) -> (
+        SidecarBackend,
+        String,
+        Option<Arc<dyn crate::provider::Provider>>,
+    ) {
+        let named_spec = model
+            .split_once(':')
+            .map(|(prefix, rest)| (prefix.trim(), rest.trim()))
+            .filter(|(prefix, rest)| {
+                !prefix.is_empty()
+                    && !rest.is_empty()
+                    && crate::config::config().providers.contains_key(*prefix)
+            });
+        if named_spec.is_none() {
+            crate::logging::warn(&format!(
+                "Ignoring unsupported memory sidecar model override '{}'; expected an OpenAI or Claude model, or a '<providers.name>:<model>' spec",
+                model
+            ));
+            return Self::auto_select_backend();
+        }
+        let Some(fork) = crate::provider::active_provider_fork() else {
+            crate::logging::warn(&format!(
+                "Ignoring memory sidecar model override '{}': no active provider is registered",
+                model
+            ));
+            return Self::auto_select_backend();
+        };
+        match fork.set_model(&model) {
+            Ok(()) => (SidecarBackend::Provider, model, Some(fork)),
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "Memory sidecar could not select '{}' on the provider fork ({}); falling back to auto-select",
+                    model, err
+                ));
+                Self::auto_select_backend()
+            }
+        }
+    }
+
+    /// Apply `agents.memory_reasoning_effort` where the selected backend
+    /// supports it. The dedicated Claude path (haiku) has no reasoning
+    /// surface and ignores the setting.
+    fn apply_configured_reasoning_effort(&mut self) {
+        let Some(effort) = crate::config::config()
+            .agents
+            .memory_reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        else {
+            return;
+        };
+        match self.backend {
+            SidecarBackend::OpenAI => {
+                self.reasoning_override = Some(effort.to_string());
+            }
+            SidecarBackend::Provider => {
+                if let Some(provider) = &self.provider {
+                    if let Err(err) = provider.set_reasoning_effort(effort) {
+                        crate::logging::warn(&format!(
+                            "Memory sidecar could not apply reasoning effort '{}' on the provider fork ({})",
+                            effort, err
+                        ));
+                    }
+                }
+            }
+            SidecarBackend::Claude => {}
         }
     }
 
@@ -1295,6 +1367,61 @@ mod tests {
         reply: String,
     }
 
+    /// Provider stub that records `set_model`/`set_reasoning_effort` calls so
+    /// named-provider specs and configured effort can be observed without a
+    /// real backend.
+    struct RecordingProvider {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for RecordingProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let stream = futures::stream::once(async move {
+                Ok(jcode_message_types::StreamEvent::TextDelta(
+                    "ok".to_string(),
+                ))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn model(&self) -> String {
+            "recording-model".to_string()
+        }
+
+        fn set_model(&self, model: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("set_model:{model}"));
+            Ok(())
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("set_reasoning_effort:{effort}"));
+            Ok(())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(RecordingProvider {
+                calls: self.calls.clone(),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl crate::provider::Provider for StubProvider {
         async fn complete(
@@ -1391,6 +1518,76 @@ mod tests {
 
         assert_eq!(sidecar.model_name(), "configured-profile-model");
         assert_eq!(out, "configured-profile-response");
+    }
+
+    /// `agents.memory_model = "<providers.name>:<model>"` binds that named
+    /// provider profile on the sidecar fork, so memory calls can be pinned to
+    /// a provider other than the session's active one. The configured
+    /// `memory_reasoning_effort` is forwarded to the fork.
+    #[test]
+    fn named_provider_spec_binds_profile_on_fork() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[agents]
+memory_model = "testprov:test-model"
+memory_reasoning_effort = "low"
+
+[providers.testprov]
+type = "openai-compatible"
+base_url = "https://example.invalid"
+auth = "none"
+"#,
+        )
+        .expect("write config.toml");
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::provider::set_active_provider(std::sync::Arc::new(RecordingProvider {
+            calls: calls.clone(),
+        }));
+
+        let sidecar = Sidecar::new();
+        assert_eq!(sidecar.backend_name(), "provider");
+        // The full spec is stored so logs/tests keep the routing source.
+        assert_eq!(sidecar.model_name(), "testprov:test-model");
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|c| c == "set_model:testprov:test-model"),
+            "fork must receive the full spec via set_model; got {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c == "set_reasoning_effort:low"),
+            "configured memory_reasoning_effort must reach the fork; got {calls:?}"
+        );
+    }
+
+    /// A `<prefix>:<model>` spec whose prefix is not a configured named
+    /// provider keeps the historical warn-and-auto-select behavior and never
+    /// touches the provider fork.
+    #[test]
+    fn unknown_named_provider_spec_falls_back_to_auto_select() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::provider::set_active_provider(std::sync::Arc::new(RecordingProvider {
+            calls: calls.clone(),
+        }));
+
+        let sidecar = Sidecar::with_configured_model(Some("nosuchprovider:m".to_string()));
+        assert_eq!(sidecar.backend_name(), "provider");
+        // Auto-select rides the active provider as-is: no set_model override.
+        assert_eq!(sidecar.model_name(), "recording-model");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "unknown prefixes must not reach set_model"
+        );
     }
 
     /// Every provider jcode supports should drive the sidecar end-to-end via the

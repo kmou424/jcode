@@ -497,9 +497,13 @@ swarm_max_concurrent_agents = 32
 #
 # Optional text-generating extraction is separate from recall. Disable it to
 # learn only through the main agent's explicit memory writes.
-# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
+# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL,
+# JCODE_MEMORY_REASONING_EFFORT
 # memory_sidecar_enabled = true
 # memory_model = "gpt-5.6-luna"
+# memory_model also accepts "<providers.name>:<model>" named provider specs,
+# e.g. "sub2api:deepseek-v4.1-flash".
+# memory_reasoning_effort = "low"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
 
