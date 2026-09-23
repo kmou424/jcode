@@ -310,9 +310,17 @@ impl Config {
                 .unwrap_or("(inherit current session)"),
             self.agents.memory_jev_provider,
             if self.agents.memory_sidecar_enabled {
-                "enabled"
+                match (
+                    self.agents.memory_model.as_deref(),
+                    self.agents.memory_reasoning_effort.as_deref(),
+                ) {
+                    (Some(model), Some(effort)) => format!("enabled ({model}, effort {effort})"),
+                    (Some(model), None) => format!("enabled ({model})"),
+                    (None, Some(effort)) => format!("enabled (effort {effort})"),
+                    (None, None) => "enabled".to_string(),
+                }
             } else {
-                "disabled"
+                "disabled".to_string()
             },
             self.ambient
                 .model
