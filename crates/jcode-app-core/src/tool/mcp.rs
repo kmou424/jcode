@@ -167,6 +167,10 @@ impl Tool for McpSearchTool {
 #[derive(Debug, Deserialize)]
 struct McpCallInput {
     server: String,
+    // The tool-name slot collides with `tool` in batch item objects and with
+    // the caller's own "which tool do I run" framing, so models commonly emit
+    // `tool_name` instead; treat it as the same field.
+    #[serde(alias = "tool_name")]
     tool: String,
     #[serde(default)]
     arguments: Value,
@@ -219,7 +223,15 @@ impl Tool for McpCallTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let mut params: McpCallInput = serde_json::from_value(input)?;
+        let mut params: McpCallInput = serde_json::from_value(input).map_err(|err| {
+            // Bare serde errors like "missing field `server`" leave the model
+            // blind — it cannot tell the accepted shape and guesses key names
+            // across retries. Attach the declared schema so a single error
+            // round-trip is enough to self-correct.
+            let schema_json = serde_json::to_string(&self.parameters_schema()).unwrap_or_default();
+            let schema = jcode_core::util::truncate_str(&schema_json, 2000);
+            anyhow::anyhow!("{err}. Expected input schema: {schema}")
+        })?;
         let dispatched_name = dispatch_name(&params.server, &params.tool);
         // Check the current alias too: a per-alias deny must not be bypassed
         // by spelling the original server/tool pair through mcp_call.
@@ -1105,5 +1117,35 @@ mod tests {
                 || result.output.contains("Connected servers: 0")
                 || result.output.contains("Reloaded MCP config")
         );
+    }
+
+    #[test]
+    fn mcp_call_input_accepts_tool_name_alias() {
+        // Models in a tool-picking frame emit `tool_name` for the nested MCP
+        // tool; it must land in the `tool` slot.
+        let params: McpCallInput = serde_json::from_value(json!({
+            "server": "gitea",
+            "tool_name": "list_issues",
+            "arguments": {"state": "all"}
+        }))
+        .unwrap();
+        assert_eq!(params.server, "gitea");
+        assert_eq!(params.tool, "list_issues");
+        assert_eq!(params.arguments["state"], "all");
+    }
+
+    #[tokio::test]
+    async fn mcp_call_schema_error_echoes_expected_input() {
+        let tool = McpCallTool::new(Arc::clone(create_test_tool().manager()));
+        let ctx = create_test_context();
+        let err = tool
+            .execute(json!({"tool": "list_issues"}), ctx)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("missing field"), "{message}");
+        assert!(message.contains("Expected input schema"), "{message}");
+        assert!(message.contains("\"server\""), "{message}");
+        assert!(message.contains("\"arguments\""), "{message}");
     }
 }

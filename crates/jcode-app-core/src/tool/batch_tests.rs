@@ -164,6 +164,67 @@ fn test_normalize_already_nested() {
 }
 
 #[test]
+fn test_normalize_keeps_arguments_as_parameter_when_siblings_exist() {
+    // mcp_call-shaped items: `arguments` is a real parameter of the target
+    // tool, not the whole parameter object — siblings like `server` and
+    // `tool_name` must survive normalization instead of being dropped when
+    // `arguments` is remapped away.
+    let input = json!({
+        "tool_calls": [{
+            "tool": "mcp_call",
+            "intent": "list issues",
+            "server": "gitea",
+            "tool_name": "list_issues",
+            "arguments": {"owner": "kmou424", "repo": "mikumikusex", "state": "all"}
+        }]
+    });
+
+    let normalized = normalize_batch_input(input);
+    let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+    let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
+    assert_eq!(params["server"], "gitea");
+    assert_eq!(params["tool_name"], "list_issues");
+    assert_eq!(params["arguments"]["repo"], "mikumikusex");
+    assert_eq!(params["intent"], "list issues");
+}
+
+#[test]
+fn test_normalize_arguments_alone_still_remaps_to_parameters() {
+    let input = json!({
+        "tool_calls": [{
+            "tool": "read",
+            "intent": "read file",
+            "arguments": {"file_path": "file1.txt"}
+        }]
+    });
+
+    let normalized = normalize_batch_input(input);
+    let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+    let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
+    assert_eq!(params["file_path"], "file1.txt");
+    assert_eq!(params["intent"], "read file");
+}
+
+#[test]
+fn test_normalize_merges_stray_keys_into_existing_parameters() {
+    let input = json!({
+        "tool_calls": [{
+            "tool": "mcp_call",
+            "intent": "list issues",
+            "server": "gitea",
+            "parameters": {"tool": "list_issues", "arguments": {}}
+        }]
+    });
+
+    let normalized = normalize_batch_input(input);
+    let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+    let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
+    assert_eq!(params["server"], "gitea");
+    assert_eq!(params["tool"], "list_issues");
+    assert_eq!(params["arguments"], json!({}));
+}
+
+#[test]
 fn test_normalize_forwards_top_level_intent_into_nested_parameters() {
     let input = json!({
         "tool_calls": [{

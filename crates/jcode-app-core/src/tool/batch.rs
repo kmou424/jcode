@@ -141,10 +141,28 @@ fn normalize_batch_input(mut input: Value) -> Value {
                 }
 
                 if !obj.contains_key("parameters") {
-                    for alias in ["arguments", "args", "input"] {
-                        if let Some(alias_val) = obj.remove(alias) {
+                    // `arguments`/`args`/`input` as the only parameter-shaped
+                    // key means the whole object IS the parameter set — remap
+                    // it wholesale. When other fields are present (e.g. a call
+                    // to `mcp_call` carrying `server`/`tool_name` plus a literal
+                    // `arguments` parameter of its own), remapping would turn
+                    // the inner args into the entire parameter object and
+                    // silently drop the siblings, so the aliases keep their
+                    // names inside the collected params instead.
+                    const PARAM_ALIASES: [&str; 3] = ["arguments", "args", "input"];
+                    let alias = PARAM_ALIASES
+                        .iter()
+                        .find(|key| obj.contains_key(**key))
+                        .copied();
+                    let has_other_fields = obj.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "tool" | "intent" | jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY
+                        ) && !PARAM_ALIASES.contains(&key.as_str())
+                    });
+                    if let Some(alias_key) = alias.filter(|_| !has_other_fields) {
+                        if let Some(alias_val) = obj.remove(alias_key) {
                             obj.insert("parameters".to_string(), alias_val);
-                            break;
                         }
                     }
                 }
@@ -177,6 +195,34 @@ fn normalize_batch_input(mut input: Value) -> Value {
                     && !params.contains_key(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
                 {
                     params.insert(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY.to_string(), accept);
+                }
+
+                // Fields left beside an explicit `parameters` object are
+                // misplaced parameters more often than noise: merge them in
+                // rather than letting serde drop them silently.
+                if obj.get("parameters").and_then(Value::as_object).is_some() {
+                    let stray_keys: Vec<String> = obj
+                        .keys()
+                        .filter(|key| {
+                            !matches!(
+                                key.as_str(),
+                                "tool"
+                                    | "parameters"
+                                    | "intent"
+                                    | jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    let stray: Vec<(String, Value)> = stray_keys
+                        .into_iter()
+                        .filter_map(|key| obj.remove(&key).map(|value| (key, value)))
+                        .collect();
+                    if let Some(params) = obj.get_mut("parameters").and_then(Value::as_object_mut) {
+                        for (key, value) in stray {
+                            params.entry(key).or_insert(value);
+                        }
+                    }
                 }
 
                 if !obj.contains_key("parameters") && obj.contains_key("tool") {
