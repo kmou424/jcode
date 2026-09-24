@@ -48,7 +48,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 
-$Repo = "1jehuang/jcode"
+$Repo = "kmou424/jcode"
 $ReleaseMetadataBase = if ($env:JCODE_RELEASE_METADATA_BASE) {
     $env:JCODE_RELEASE_METADATA_BASE.TrimEnd('/')
 } else {

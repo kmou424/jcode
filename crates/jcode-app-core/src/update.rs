@@ -3,8 +3,8 @@ use crate::storage;
 use anyhow::{Context, Result};
 use jcode_update_core::{
     BACKGROUND_UPDATE_THRESHOLD, estimate_release_update_duration, estimate_source_update_duration,
-    format_duration_estimate, get_asset_name, summarize_git_pull_failure, update_estimate,
-    verify_asset_checksum_text, version_is_newer,
+    format_duration_estimate, get_asset_name, select_latest_release, summarize_git_pull_failure,
+    update_estimate, verify_asset_checksum_text, version_is_newer,
 };
 pub use jcode_update_core::{
     DownloadProgress, GIT_PULL_DIVERGED_SUMMARY, GitHubAsset, GitHubRelease, PreparedUpdate,
@@ -28,7 +28,9 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
-const GITHUB_REPO: &str = "1jehuang/jcode";
+// The fork publishes its own releases; the updater must look there rather
+// than at upstream so self-updates carry the local patch series.
+const GITHUB_REPO: &str = "kmou424/jcode";
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
@@ -103,30 +105,138 @@ fn current_update_semver() -> &'static str {
 }
 
 /// Dev display versions include a commit-count offset, not release precedence.
-/// Use the base version to reject older releases, then verify that installing
-/// a newer release would not discard commits from the running development build.
+/// Release builds compare tag commits directly; development builds must
+/// compare against the commit the release was *packaged from* because the
+/// fork's rebased patch lines never yield the ancestry the upstream guard
+/// assumed.
 fn release_is_update(release: &GitHubRelease) -> Result<bool> {
     release_is_update_with(
-        &release.tag_name,
+        release,
         current_update_semver(),
         is_release_build(),
-        || update_dev_guard::should_install_release(&release.tag_name),
+        jcode_build_meta::GIT_HASH,
+        fetch_release_pkg_commit,
+        update_dev_guard::should_install_release,
     )
 }
 
 fn release_is_update_with(
-    release: &str,
+    release: &GitHubRelease,
     current: &str,
     release_build: bool,
-    dev_guard: impl FnOnce() -> Result<bool>,
+    embedded_hash: &str,
+    pkg_commit: impl FnOnce(&GitHubRelease) -> Result<String>,
+    dev_guard: impl FnOnce(&str, &str) -> Result<bool>,
 ) -> Result<bool> {
-    if !version_is_newer(release, current) {
+    let release_newer = version_is_newer(&release.tag_name, current);
+    if release_build {
+        // A same-tag repackage is still an update when the release targets a
+        // different commit than the one this binary was built from. Release
+        // builds identify themselves by the embedded git hash, so the tag's
+        // target_commitish is a reliable "did the line move" signal. It only
+        // fires on exact semver equality — a strictly older release must never
+        // pull the install backwards.
+        let same_version = !release_newer && !version_is_newer(current, &release.tag_name);
+        if same_version {
+            return Ok(commitish_is_different_commit(
+                &release.target_commitish,
+                embedded_hash,
+            ));
+        }
+        return Ok(release_newer);
+    }
+    // A strictly older release line is never an update for a dev build.
+    if version_is_newer(current, &release.tag_name) {
         return Ok(false);
     }
-    if release_build {
-        return Ok(true);
+    // Same or newer semver. The packaged commit is fetched before any
+    // ancestry work: running exactly the packaged commit is never an update.
+    let packaged = pkg_commit(release)?;
+    if embedded_hash.len() >= 7 && packaged.starts_with(embedded_hash) {
+        return Ok(false);
     }
-    dev_guard()
+    dev_guard(&release.tag_name, &packaged)
+}
+
+/// `release-info.json`, published by the fork's repackage job.
+#[derive(Debug, serde::Deserialize)]
+struct ReleaseInfo {
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    commit: String,
+}
+
+/// The commit a release was packaged from. `release-info.json` is the
+/// authoritative record the repackage workflow publishes alongside the
+/// binaries; `target_commitish` is the fallback for releases without one.
+fn fetch_release_pkg_commit(release: &GitHubRelease) -> Result<String> {
+    let commit = fetch_release_info_blocking(release)
+        .inspect_err(|error| {
+            crate::logging::warn(&format!(
+                "update: failed to fetch release-info.json for {}: {:#}",
+                release.tag_name, error
+            ));
+        })
+        .ok()
+        .flatten()
+        .filter(|info| info.tag.is_empty() || info.tag == release.tag_name)
+        .map(|info| info.commit)
+        .filter(|commit| is_full_commit_sha(commit))
+        .unwrap_or_else(|| release.target_commitish.trim().to_string());
+    if !is_full_commit_sha(&commit) {
+        anyhow::bail!(
+            "Cannot determine which commit release {} was packaged from: no release-info.json and target_commitish {:?} is not a commit sha",
+            release.tag_name,
+            release.target_commitish
+        );
+    }
+    Ok(commit)
+}
+
+fn is_full_commit_sha(commit: &str) -> bool {
+    matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn fetch_release_info_blocking(release: &GitHubRelease) -> Result<Option<ReleaseInfo>> {
+    let Some(asset) = release
+        .assets
+        .iter()
+        .find(|a| a.name == "release-info.json")
+    else {
+        return Ok(None);
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .user_agent("jcode-updater")
+        .build()?;
+    let response = github_api_request(&client, &asset.browser_download_url)
+        .send()
+        .context("Failed to fetch release-info.json")?;
+    if let Some(error) = rate_limit_error(&response) {
+        return Err(error);
+    }
+    if !response.status().is_success() {
+        anyhow::bail!("release-info.json download failed: {}", response.status());
+    }
+    let info = response
+        .json()
+        .context("Failed to parse release-info.json")?;
+    Ok(Some(info))
+}
+
+/// True when `target_commitish` is a commit sha that does not start with the
+/// build's embedded short hash — i.e. the release tag was recreated on a
+/// different commit. Both sides must look like hex shas: a branch name (or
+/// an unknown/unavailable hash) cannot prove the tag moved, so it is treated
+/// as "same" and the plain semver comparison decides instead.
+fn commitish_is_different_commit(commitish: &str, embedded_hash: &str) -> bool {
+    let commitish = commitish.trim();
+    embedded_hash.len() >= 7
+        && embedded_hash.chars().all(|c| c.is_ascii_hexdigit())
+        && commitish.len() >= embedded_hash.len()
+        && commitish.chars().all(|c| c.is_ascii_hexdigit())
+        && !commitish.starts_with(embedded_hash)
 }
 
 fn source_build_root() -> Result<PathBuf> {
@@ -191,7 +301,10 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
+        // `/releases/latest` follows publish order, which a fixed `latest`
+        // alias tag would always win. List releases and pick the highest
+        // strict-semver tag instead so versioned tags carry the ordering.
+        "https://api.github.com/repos/{}/releases?per_page=100",
         GITHUB_REPO
     );
 
@@ -216,7 +329,8 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         anyhow::bail!("GitHub API error: {}", response.status());
     }
 
-    let release: GitHubRelease = response.json().context("Failed to parse release info")?;
+    let releases: Vec<GitHubRelease> = response.json().context("Failed to parse release list")?;
+    let release = select_latest_release(releases).context("No versioned releases found")?;
     clear_rate_limit_backoff();
     Ok(release)
 }
@@ -241,8 +355,19 @@ fn github_api_request(
     }
 }
 
+/// The per-version patch branch this build tracks. Derived from the package
+/// version (Cargo.toml) rather than git history: `0.88.0` builds belong to
+/// the `kmou424/v0.88.0` line.
+fn fork_patch_branch() -> String {
+    format!("kmou424/v{}", jcode_build_meta::PKG_VERSION)
+}
+
 fn latest_main_sha_blocking() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
+    let branch = fork_patch_branch();
+    let url = format!(
+        "https://api.github.com/repos/{}/commits/{}",
+        GITHUB_REPO, branch
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
@@ -250,12 +375,16 @@ fn latest_main_sha_blocking() -> Result<String> {
 
     let response = github_api_request(&client, &url)
         .send()
-        .context("Failed to check main branch")?;
+        .with_context(|| format!("Failed to check {} branch", branch))?;
     if let Some(error) = rate_limit_error(&response) {
         return Err(error);
     }
     if !response.status().is_success() {
-        anyhow::bail!("GitHub API error checking main: {}", response.status());
+        anyhow::bail!(
+            "GitHub API error checking {}: {}",
+            branch,
+            response.status()
+        );
     }
 
     let commit: serde_json::Value = response.json().context("Failed to parse commit info")?;
@@ -310,11 +439,13 @@ fn verify_asset_checksum_if_available(
 fn synthetic_main_release(latest_sha: &str) -> GitHubRelease {
     GitHubRelease {
         tag_name: format!("main-{}", latest_sha),
+        draft: false,
+        prerelease: false,
         _name: Some(format!("Built from main ({})", latest_sha)),
         _html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
         _published_at: None,
         assets: vec![],
-        _target_commitish: latest_sha.to_string(),
+        target_commitish: latest_sha.to_string(),
     }
 }
 
@@ -680,19 +811,20 @@ fn build_from_source() -> Result<PathBuf> {
 
     if repo_dir.join(".git").exists() {
         // Pull latest
-        crate::logging::info("Main channel: pulling latest from main...");
+        let branch = fork_patch_branch();
+        crate::logging::info(&format!("Main channel: pulling latest from {}...", branch));
         let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
+            .args(["pull", "--ff-only", "origin", &branch])
             .current_dir(&repo_dir)
             .output()
             .context("Failed to run git pull")?;
 
         if !output.status.success() {
-            // If pull fails (e.g. diverged), reset to origin/main
+            // If pull fails (e.g. diverged), reset to the remote patch branch
             let summary = summarize_git_pull_failure(&output.stderr);
             crate::logging::warn(&format!("{}, trying reset", summary));
             let output = std::process::Command::new("git")
-                .args(["fetch", "origin", "main"])
+                .args(["fetch", "origin", &branch])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git fetch")?;
@@ -703,7 +835,7 @@ fn build_from_source() -> Result<PathBuf> {
                 );
             }
             let output = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/main"])
+                .args(["reset", "--hard", &format!("origin/{}", branch)])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git reset")?;
@@ -716,21 +848,39 @@ fn build_from_source() -> Result<PathBuf> {
         }
     } else {
         // Clone
-        crate::logging::info("Main channel: cloning repository...");
+        let branch = fork_patch_branch();
+        crate::logging::info(&format!(
+            "Main channel: cloning repository (branch {})...",
+            branch
+        ));
         let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
         let output = std::process::Command::new("git")
             .args([
-                "clone", "--depth", "1", "--branch", "main", &clone_url, "jcode",
+                "clone", "--depth", "1", "--branch", &branch, &clone_url, "jcode",
             ])
             .current_dir(&build_dir)
             .output()
             .context("Failed to run git clone")?;
 
         if !output.status.success() {
-            anyhow::bail!(
-                "git clone failed: {}",
+            // The patch branch for this version may not exist on the remote
+            // yet; fall back to the default branch.
+            crate::logging::warn(&format!(
+                "git clone --branch {} failed ({}), falling back to default branch",
+                branch,
                 String::from_utf8_lossy(&output.stderr)
-            );
+            ));
+            let output = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", &clone_url, "jcode"])
+                .current_dir(&build_dir)
+                .output()
+                .context("Failed to run git clone")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "git clone failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
     }
 
@@ -1224,6 +1374,33 @@ mod tests {
     }
 
     #[test]
+    fn test_commitish_is_different_commit() {
+        // Same commit: tag sha starts with the embedded short hash.
+        assert!(!commitish_is_different_commit(
+            "6b8af47850ef0fd56c73b04765ea7eef3cd5181b",
+            "6b8af4785"
+        ));
+        // Repackaged tag on a different commit counts as an update.
+        assert!(commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            "6b8af4785"
+        ));
+        // A branch name cannot prove the tag moved.
+        assert!(!commitish_is_different_commit("main", "6b8af4785"));
+        // Unknown/empty embedded hash cannot prove it either.
+        assert!(!commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            "unknown"
+        ));
+        assert!(!commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            ""
+        ));
+        // Commitish shorter than the embedded hash is not comparable.
+        assert!(!commitish_is_different_commit("abc1234", "6b8af4785"));
+    }
+
+    #[test]
     fn test_asset_name() {
         let name = get_asset_name();
         assert!(name.starts_with("jcode-"));
@@ -1306,46 +1483,177 @@ mod tests {
         assert!(err.contains("invalid SHA256 digest"));
     }
 
+    fn test_release(tag: &str) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag.to_string(),
+            draft: false,
+            prerelease: false,
+            _name: None,
+            _html_url: String::new(),
+            _published_at: None,
+            assets: vec![],
+            target_commitish: String::new(),
+        }
+    }
+
+    fn no_packaged_commit(_: &GitHubRelease) -> Result<String> {
+        panic!("this comparison must not need the packaged commit")
+    }
+
+    fn no_dev_guard(_: &str, _: &str) -> Result<bool> {
+        panic!("this comparison must not reach the dev guard")
+    }
+
     #[test]
-    fn release_update_rejects_equal_or_older_versions_without_ancestry_probe() {
+    fn release_update_rejects_older_versions_without_ancestry_probe() {
         for release_build in [true, false] {
-            for release in ["v0.82.9", "v0.83.0"] {
-                assert!(
-                    !release_is_update_with(release, "0.83.0", release_build, || {
-                        panic!("older releases must not need a GitHub ancestry check")
-                    })
-                    .unwrap()
-                );
-            }
+            assert!(
+                !release_is_update_with(
+                    &test_release("v0.82.9"),
+                    "0.83.0",
+                    release_build,
+                    "abc1234",
+                    no_packaged_commit,
+                    no_dev_guard
+                )
+                .unwrap()
+            );
         }
     }
 
     #[test]
-    fn release_update_allows_newer_release_build_without_ancestry_probe() {
+    fn release_update_same_version_release_build_compares_target_commitish() {
+        let mut release = test_release("v0.83.0");
+        // Repackage moved the tag to a different commit: this is an update.
+        release.target_commitish = "0".repeat(40);
         assert!(
-            release_is_update_with("v0.83.1", "0.83.0", true, || {
-                panic!("release builds must not need a GitHub ancestry check")
-            })
+            release_is_update_with(
+                &release,
+                "0.83.0",
+                true,
+                "abc1234",
+                no_packaged_commit,
+                no_dev_guard
+            )
+            .unwrap()
+        );
+        // Tag still points at the embedded commit: not an update.
+        release.target_commitish = format!("abc1234{}", "f".repeat(33));
+        assert!(
+            !release_is_update_with(
+                &release,
+                "0.83.0",
+                true,
+                "abc1234",
+                no_packaged_commit,
+                no_dev_guard
+            )
             .unwrap()
         );
     }
 
     #[test]
-    fn release_update_preserves_dev_commits_even_when_release_number_is_newer() {
-        assert!(!release_is_update_with("v0.84.0", "0.83.0", false, || Ok(false)).unwrap());
+    fn release_update_allows_newer_release_build_without_ancestry_probe() {
+        assert!(
+            release_is_update_with(
+                &test_release("v0.83.1"),
+                "0.83.0",
+                true,
+                "abc1234",
+                no_packaged_commit,
+                no_dev_guard
+            )
+            .unwrap()
+        );
     }
 
     #[test]
-    fn release_update_allows_dev_build_behind_release() {
-        assert!(release_is_update_with("v0.83.1", "0.83.0", false, || Ok(true)).unwrap());
+    fn dev_release_update_rejects_running_the_packaged_commit() {
+        let embedded = "abc1234";
+        let packaged = format!("{embedded}{}", "f".repeat(33));
+        assert!(
+            !release_is_update_with(
+                &test_release("v0.83.0"),
+                "0.83.0",
+                false,
+                embedded,
+                |_| Ok(packaged.clone()),
+                no_dev_guard
+            )
+            .unwrap()
+        );
     }
 
     #[test]
-    fn release_update_fails_closed_when_dev_ancestry_cannot_be_verified() {
-        let result = release_is_update_with("v0.84.0", "0.83.0", false, || {
-            anyhow::bail!("Cannot verify development build ancestry")
-        });
-        assert!(result.unwrap_err().to_string().contains("Cannot verify"));
+    fn dev_release_update_consults_guard_for_same_or_newer_releases() {
+        // Repackage: same semver but the packaged commit moved → the dev
+        // guard's ancestry comparison decides.
+        let packaged = "f".repeat(40);
+        for tag in ["v0.83.0", "v0.84.0"] {
+            assert!(
+                release_is_update_with(
+                    &test_release(tag),
+                    "0.83.0",
+                    false,
+                    "abc1234",
+                    |_| Ok(packaged.clone()),
+                    |release_tag, commit| {
+                        assert_eq!(release_tag, tag);
+                        assert_eq!(commit, packaged);
+                        Ok(true)
+                    }
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn dev_release_update_keeps_build_when_guard_says_no() {
+        let packaged = "f".repeat(40);
+        assert!(
+            !release_is_update_with(
+                &test_release("v0.84.0"),
+                "0.83.0",
+                false,
+                "abc1234",
+                |_| Ok(packaged.clone()),
+                |_, _| Ok(false)
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn dev_release_update_fails_closed_when_packaged_commit_is_unknown() {
+        let result = release_is_update_with(
+            &test_release("v0.84.0"),
+            "0.83.0",
+            false,
+            "abc1234",
+            |_| anyhow::bail!("cannot determine packaged commit"),
+            no_dev_guard,
+        );
+        assert!(result.unwrap_err().to_string().contains("packaged commit"));
+    }
+
+    #[test]
+    fn dev_release_update_propagates_guard_errors() {
+        let packaged = "f".repeat(40);
+        let result = release_is_update_with(
+            &test_release("v0.84.0"),
+            "0.83.0",
+            false,
+            "abc1234",
+            |_| Ok(packaged),
+            |_, _| anyhow::bail!("cannot verify ancestry"),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot verify ancestry")
+        );
     }
 
     #[test]
