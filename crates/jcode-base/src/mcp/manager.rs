@@ -368,6 +368,65 @@ impl McpManager {
             .collect()
     }
 
+    /// Server-supplied `instructions`, preferring the live connection and
+    /// falling back to the fingerprint-matched schema cache.
+    pub async fn server_instructions(&self, server: &str) -> Option<String> {
+        if let Some(instructions) = self
+            .pool_handles
+            .read()
+            .await
+            .get(server)
+            .and_then(McpHandle::instructions)
+        {
+            return Some(instructions);
+        }
+        if let Some(instructions) = self
+            .owned_clients
+            .read()
+            .await
+            .get(server)
+            .and_then(McpClient::instructions)
+        {
+            return Some(instructions);
+        }
+        let config = self.config.servers.get(server)?;
+        super::McpSchemaCache::load()
+            .instructions_for(server, config)
+            .map(str::to_string)
+    }
+
+    /// Markdown bullet list of enabled `direct: false` servers for the
+    /// `mcp_search` description. Those servers' tools never appear as direct
+    /// `mcp__*` definitions, so without a roster the model has no way to learn
+    /// they exist. `None` when every enabled server exposes tools directly.
+    pub async fn search_only_server_roster(&self) -> Option<String> {
+        let names: Vec<String> = self
+            .config
+            .servers
+            .iter()
+            .filter(|(_, config)| config.is_enabled() && !config.exposes_tools())
+            .map(|(name, _)| name.clone())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        let mut roster = String::from(
+            "\n\nSearch-only MCP servers (reachable through mcp_search/mcp_call, \
+             never exposed as direct tools):",
+        );
+        for name in names {
+            roster.push_str("\n- ");
+            roster.push_str(&name);
+            if let Some(instructions) = self.server_instructions(&name).await
+                && let Some(line) = instructions.lines().map(str::trim).find(|l| !l.is_empty())
+            {
+                roster.push_str(" — ");
+                roster.push_str(jcode_core::util::truncate_str(line, 160));
+            }
+        }
+        Some(roster)
+    }
+
     /// Call a tool on a specific server.
     ///
     /// Connect-on-first-call: if the server is configured but not yet connected
@@ -917,5 +976,54 @@ done
         let names: Vec<_> = searchable.iter().map(|(s, _)| s.as_str()).collect();
         assert!(names.contains(&"shown"));
         assert!(names.contains(&"hidden"), "direct:false stays searchable");
+    }
+
+    #[tokio::test]
+    async fn search_only_server_roster_lists_hidden_enabled_servers() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home tempdir");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let server = |direct: Option<bool>, disabled: Option<bool>| McpServerConfig {
+            command: "true".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            shared: false,
+            transport: None,
+            url: None,
+            headers: HashMap::new(),
+            enabled: None,
+            disabled,
+            timeout_secs: None,
+            request_timeout_ms: None,
+            direct,
+        };
+        let mut config = McpConfig::default();
+        config
+            .servers
+            .insert("hidden".to_string(), server(Some(false), None));
+        config
+            .servers
+            .insert("shown".to_string(), server(None, None));
+        config
+            .servers
+            .insert("off".to_string(), server(Some(false), Some(true)));
+        let manager = McpManager::with_config(config);
+
+        let roster = manager
+            .search_only_server_roster()
+            .await
+            .expect("hidden server must produce a roster");
+        assert!(roster.contains("\n- hidden"), "{roster}");
+        assert!(!roster.contains("shown"), "{roster}");
+        assert!(!roster.contains("off"), "{roster}");
+
+        // No direct:false servers -> no roster at all.
+        let mut direct_config = McpConfig::default();
+        direct_config
+            .servers
+            .insert("shown".to_string(), server(None, None));
+        let manager = McpManager::with_config(direct_config);
+        assert!(manager.search_only_server_roster().await.is_none());
     }
 }

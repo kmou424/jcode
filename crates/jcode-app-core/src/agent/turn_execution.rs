@@ -617,7 +617,9 @@ impl Agent {
 
         if deferred {
             tools.retain(|tool| !tool.name.starts_with("mcp__"));
-        } else {
+        } else if !self.registry.has_search_only_mcp_servers() {
+            // Search-only (direct: false) servers never inject mcp__* tools,
+            // so dropping the fixed surface would leave them unreachable.
             tools.retain(|tool| !matches!(tool.name.as_str(), "mcp_search" | "mcp_call"));
         }
     }

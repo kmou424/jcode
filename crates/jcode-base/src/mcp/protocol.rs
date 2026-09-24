@@ -90,6 +90,10 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: Option<ServerInfo>,
+    /// Server-provided usage guidance from the MCP spec (`instructions`),
+    /// surfaced to discovery as the server's one-line description.
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

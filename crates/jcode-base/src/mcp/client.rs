@@ -21,6 +21,8 @@ pub struct McpHandle {
     pub(crate) pending: PendingMap,
     pub(crate) writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
+    /// Server-supplied `instructions` from the initialize reply.
+    instructions: Arc<std::sync::RwLock<Option<String>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     /// Tool list shared with the HTTP transport task for `x-mcp-header`
     /// argument mirroring (Mcp-Param-* headers).
@@ -70,6 +72,7 @@ impl McpHandle {
                 pending,
                 writer_tx,
                 server_info: Arc::new(std::sync::RwLock::new(None)),
+                instructions: Arc::new(std::sync::RwLock::new(None)),
                 capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
                 tools: Arc::new(std::sync::RwLock::new(Vec::new())),
                 request_meta: Arc::new(std::sync::RwLock::new(None)),
@@ -196,6 +199,15 @@ impl McpHandle {
     /// Get server info
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.server_info
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Server-supplied `instructions` from the initialize reply, when the
+    /// server provided them.
+    pub fn instructions(&self) -> Option<String> {
+        self.instructions
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -422,6 +434,11 @@ impl McpClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
         *self
             .handle
+            .instructions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.instructions;
+        *self
+            .handle
             .capabilities
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.capabilities;
@@ -509,6 +526,10 @@ impl McpClient {
 
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.handle.server_info()
+    }
+
+    pub fn instructions(&self) -> Option<String> {
+        self.handle.instructions()
     }
 
     pub fn tools(&self) -> Vec<McpToolDef> {
