@@ -249,7 +249,11 @@ impl NotificationDispatcher {
             let host = host.clone();
             let from = from.clone();
             let port = self.config.email_smtp_port;
-            let password = self.config.email_password.clone();
+            let password = self
+                .config
+                .email_password
+                .clone()
+                .and_then(|v| jcode_provider_env::resolve_secret_value(&v));
             let title = title.to_string();
             let body = detailed_body.to_string();
             let cycle_id = cycle_id.map(|s| s.to_string());
@@ -803,8 +807,12 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
             return;
         }
     };
-    let pass = match config.email_password.as_ref() {
-        Some(p) => p.clone(),
+    let pass = match config
+        .email_password
+        .as_deref()
+        .and_then(jcode_provider_env::resolve_secret_value)
+    {
+        Some(p) => p,
         None => {
             logging::error("IMAP reply loop: no email password configured");
             return;

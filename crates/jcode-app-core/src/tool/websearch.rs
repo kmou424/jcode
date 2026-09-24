@@ -235,13 +235,16 @@ impl WebSearchTool {
             if let Some(api_key) = options
                 .configured_api_key
                 .filter(|key| !key.trim().is_empty())
+                .and_then(jcode_provider_env::resolve_secret_value)
             {
                 return self
-                    .search_bing_api(query, num_results, options.market, api_key)
+                    .search_bing_api(query, num_results, options.market, &api_key)
                     .await;
             }
-            if let Ok(api_key) = std::env::var(options.api_key_env)
-                && !api_key.trim().is_empty()
+            if let Some(api_key) = std::env::var(options.api_key_env)
+                .ok()
+                .and_then(|value| jcode_provider_env::resolve_secret_value(&value))
+                .filter(|value| !value.trim().is_empty())
             {
                 return self
                     .search_bing_api(query, num_results, options.market, &api_key)

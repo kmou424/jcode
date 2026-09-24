@@ -911,14 +911,18 @@ pub fn apply_named_provider_profile_env_from_config(
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .map(|key| {
+                    .and_then(|key| {
+                        let from_command = key.starts_with("!{");
+                        let resolved = jcode_provider_env::resolve_secret_value(key)?;
                         let env_name = inline_key_env_name(profile_name);
-                        crate::env::set_var(&env_name, key);
-                        crate::logging::warn(&format!(
-                            "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
-                            profile_name
-                        ));
-                        env_name
+                        crate::env::set_var(&env_name, &resolved);
+                        if !from_command {
+                            crate::logging::warn(&format!(
+                                "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
+                                profile_name
+                            ));
+                        }
+                        Some(env_name)
                     })
             });
         if let Some(key_env) = key_env {
@@ -1047,15 +1051,24 @@ pub fn apply_named_provider_profile_env_from_config(
                 .filter(|v| !v.is_empty())
                 .map(ToString::to_string)
                 .or_else(|| {
-                    profile.api_key.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(|key| {
-                        let env_name = inline_key_env_name(profile_name);
-                        crate::env::set_var(&env_name, key);
-                        crate::logging::warn(&format!(
-                            "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
-                            profile_name
-                        ));
-                        env_name
-                    })
+                    profile
+                        .api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .and_then(|key| {
+                            let from_command = key.starts_with("!{");
+                            let resolved = jcode_provider_env::resolve_secret_value(key)?;
+                            let env_name = inline_key_env_name(profile_name);
+                            crate::env::set_var(&env_name, &resolved);
+                            if !from_command {
+                                crate::logging::warn(&format!(
+                                    "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
+                                    profile_name
+                                ));
+                            }
+                            Some(env_name)
+                        })
                 });
 
             if let Some(key_env) = key_env {

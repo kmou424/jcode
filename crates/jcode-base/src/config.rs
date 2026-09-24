@@ -500,6 +500,7 @@ pub fn invalidate_config_cache() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.force_reload = true;
     drop(cache);
+    jcode_provider_env::clear_substitution_cache();
     notify_config_reloaded();
 }
 

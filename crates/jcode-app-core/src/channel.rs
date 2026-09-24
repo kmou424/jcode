@@ -28,7 +28,10 @@ impl ChannelRegistry {
 
         if config.telegram_enabled
             && let (Some(token), Some(chat_id)) = (
-                config.telegram_bot_token.clone(),
+                config
+                    .telegram_bot_token
+                    .clone()
+                    .and_then(|v| jcode_provider_env::resolve_secret_value(&v)),
                 config.telegram_chat_id.clone(),
             )
         {
@@ -45,7 +48,10 @@ impl ChannelRegistry {
 
         if config.discord_enabled
             && let (Some(token), Some(channel_id)) = (
-                config.discord_bot_token.clone(),
+                config
+                    .discord_bot_token
+                    .clone()
+                    .and_then(|v| jcode_provider_env::resolve_secret_value(&v)),
                 config.discord_channel_id.clone(),
             )
         {

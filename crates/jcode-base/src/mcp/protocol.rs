@@ -330,17 +330,14 @@ struct UnresolvedEnvironmentVariable {
     variable: String,
 }
 
-fn valid_environment_variable_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
-        && chars.all(|ch| matches!(ch, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
-}
-
 /// Expand Claude Code's documented `${VAR}` and `${VAR:-default}` syntax plus
 /// `!{cmd}` command substitution (e.g. `!{pass show mcp/token}`,
 /// `!{op read op://vault/item/field}`) in a single config string.
 /// Unsupported/malformed expressions and failed commands are preserved
 /// verbatim.
+///
+/// Delegates to `jcode-provider-env`, which shares this machinery with the
+/// whole-value `!{cmd}` substitution for secret-typed config values.
 fn expand_environment_string<F>(
     value: &str,
     lookup: &F,
@@ -349,107 +346,7 @@ fn expand_environment_string<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    let mut output = String::with_capacity(value.len());
-    let mut remainder = value;
-
-    loop {
-        // Find the earliest `${` or `!{` marker.
-        let (start, is_command) = match (remainder.find("${"), remainder.find("!{")) {
-            (Some(env), Some(cmd)) => {
-                if env < cmd {
-                    (env, false)
-                } else {
-                    (cmd, true)
-                }
-            }
-            (Some(env), None) => (env, false),
-            (None, Some(cmd)) => (cmd, true),
-            (None, None) => break,
-        };
-        output.push_str(&remainder[..start]);
-        let expression_start = start + 2;
-        let Some(relative_end) = remainder[expression_start..].find('}') else {
-            output.push_str(&remainder[start..]);
-            return output;
-        };
-        let end = expression_start + relative_end;
-        let expression = &remainder[expression_start..end];
-        let literal = &remainder[start..=end];
-
-        if is_command {
-            match run_substitution_command(expression) {
-                Some(stdout) => output.push_str(&stdout),
-                None => output.push_str(literal),
-            }
-        } else {
-            let (variable, default) = match expression.split_once(":-") {
-                Some((variable, default)) => (variable, Some(default)),
-                None => (expression, None),
-            };
-
-            if !valid_environment_variable_name(variable) {
-                output.push_str(literal);
-            } else if let Some(expanded) = lookup(variable) {
-                output.push_str(&expanded);
-            } else if let Some(default) = default {
-                output.push_str(default);
-            } else {
-                unresolved.insert(variable.to_string());
-                output.push_str(literal);
-            }
-        }
-
-        remainder = &remainder[end + 1..];
-    }
-
-    output.push_str(remainder);
-    output
-}
-
-/// Run a `!{cmd}` config substitution via `sh -c`, returning trimmed stdout.
-/// Returns `None` — leaving the literal in place — on spawn failure, non-zero
-/// exit, or timeout. The 10s deadline keeps a blocking keychain/CLI helper
-/// from hanging config load.
-fn run_substitution_command(command: &str) -> Option<String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    // Drain stdout on a thread so a chatty command cannot fill the pipe and
-    // deadlock the poll loop.
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let buf = reader.join().ok()?;
-                return Some(String::from_utf8_lossy(&buf).trim_end().to_string());
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(_) => return None,
-        }
-    }
+    jcode_provider_env::expand_environment_string(value, lookup, unresolved)
 }
 
 impl McpConfig {
