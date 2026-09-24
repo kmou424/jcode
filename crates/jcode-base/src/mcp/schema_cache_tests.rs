@@ -96,7 +96,7 @@ fn fingerprint_is_sensitive_to_http_url_and_headers() {
 fn tools_for_respects_fingerprint() {
     let mut cache = McpSchemaCache::default();
     let config = cfg("node", &["s.js"]);
-    cache.update("srv", &config, vec![tool("alpha"), tool("beta")]);
+    cache.update("srv", &config, vec![tool("alpha"), tool("beta")], None);
 
     // Same config -> cached tools returned.
     let got = cache.tools_for("srv", &config).expect("cached tools");
@@ -119,30 +119,43 @@ fn update_reports_change_only_on_diff() {
     let config = cfg("node", &["s.js"]);
 
     assert!(
-        cache.update("srv", &config, vec![tool("a")]),
+        cache.update("srv", &config, vec![tool("a")], None),
         "new entry changes"
     );
     assert!(
-        !cache.update("srv", &config, vec![tool("a")]),
+        !cache.update("srv", &config, vec![tool("a")], None),
         "identical re-update must not be marked changed"
     );
     assert!(
-        cache.update("srv", &config, vec![tool("a"), tool("b")]),
+        cache.update("srv", &config, vec![tool("a"), tool("b")], None),
         "added tool must be marked changed"
     );
     // Tool reordering should NOT count as a change (set comparison).
     assert!(
-        !cache.update("srv", &config, vec![tool("b"), tool("a")]),
+        !cache.update("srv", &config, vec![tool("b"), tool("a")], None),
         "reordered identical tools must not churn the cache"
     );
+    assert!(
+        cache.update(
+            "srv",
+            &config,
+            vec![tool("b"), tool("a")],
+            Some("usage notes".to_string())
+        ),
+        "newly observed instructions must be marked changed"
+    );
+    assert_eq!(cache.instructions_for("srv", &config), Some("usage notes"));
+    // Reconfigured server -> stale instructions must NOT be returned.
+    let reconfigured = cfg("node", &["s2.js"]);
+    assert!(cache.instructions_for("srv", &reconfigured).is_none());
 }
 
 #[test]
 fn retain_prunes_removed_servers() {
     let mut cache = McpSchemaCache::default();
     let config = cfg("node", &["s.js"]);
-    cache.update("keep", &config, vec![tool("a")]);
-    cache.update("drop", &config, vec![tool("b")]);
+    cache.update("keep", &config, vec![tool("a")], None);
+    cache.update("drop", &config, vec![tool("b")], None);
     assert_eq!(cache.server_count(), 2);
 
     let pruned = cache.retain_servers(&["keep".to_string()]);
@@ -166,7 +179,7 @@ fn load_save_roundtrip_via_temp_home() {
 
     let mut cache = McpSchemaCache::default();
     let config = cfg("node", &["s.js"]);
-    cache.update("srv", &config, vec![tool("alpha")]);
+    cache.update("srv", &config, vec![tool("alpha")], None);
     cache.save();
 
     let reloaded = McpSchemaCache::load();

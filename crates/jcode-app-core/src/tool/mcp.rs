@@ -35,6 +35,7 @@ const MAX_SEARCH_TOOL_REFERENCES: usize = 32;
 pub struct McpSearchTool {
     manager: Arc<RwLock<McpManager>>,
     registry: Option<super::WeakRegistry>,
+    description: String,
 }
 
 impl McpSearchTool {
@@ -42,12 +43,31 @@ impl McpSearchTool {
         Self {
             manager,
             registry: None,
+            description: Self::base_description().to_string(),
+        }
+    }
+
+    /// Build the search surface with `direct: false` servers listed in its
+    /// description — the only place the model can learn they exist.
+    pub fn with_server_roster(manager: Arc<RwLock<McpManager>>, roster: Option<String>) -> Self {
+        let mut description = Self::base_description().to_string();
+        if let Some(roster) = roster {
+            description.push_str(&roster);
+        }
+        Self {
+            manager,
+            registry: None,
+            description,
         }
     }
 
     pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
         self.registry = Some(registry.downgrade());
         self
+    }
+
+    fn base_description() -> &'static str {
+        "Search available MCP tools by server, name, or description. Returns callable names and input schemas."
     }
 }
 
@@ -58,7 +78,7 @@ impl Tool for McpSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search available MCP tools by server, name, or description. Returns callable names and input schemas."
+        &self.description
     }
 
     fn parameters_schema(&self) -> Value {
@@ -636,6 +656,9 @@ impl McpManagementTool {
                             &connected,
                         )
                         .await;
+                    registry
+                        .refresh_mcp_search_tool(Arc::clone(&self.manager))
+                        .await;
                 }
                 let names = crate::mcp::dispatch_names(&tools);
                 let server_tools: Vec<_> = tools
@@ -740,6 +763,9 @@ impl McpManagementTool {
                     &connected,
                 )
                 .await;
+            registry
+                .refresh_mcp_search_tool(Arc::clone(&self.manager))
+                .await;
             crate::logging::event_info(
                 "MCP_LIFECYCLE",
                 vec![
@@ -769,6 +795,9 @@ impl McpManagementTool {
                 .and_then(|registry| registry.upgrade())
             {
                 registry.unregister_prefix("mcp__").await;
+                registry
+                    .refresh_mcp_search_tool(Arc::clone(&self.manager))
+                    .await;
             }
             return Ok(ToolOutput::new(
                 "No servers found in config.\n\n\
@@ -802,6 +831,9 @@ impl McpManagementTool {
         {
             let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
             registry.reconcile_mcp_tools(mcp_tools).await;
+            registry
+                .refresh_mcp_search_tool(Arc::clone(&self.manager))
+                .await;
         }
 
         let enabled_count = config

@@ -38,6 +38,10 @@ pub struct CachedServerSchemas {
     pub fingerprint: String,
     /// Tool definitions exactly as returned by the server's `tools/list`.
     pub tools: Vec<McpToolDef>,
+    /// Server-supplied `instructions` from the initialize reply, when the
+    /// server provided them.
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 /// On-disk representation of the whole cache.
@@ -124,6 +128,17 @@ impl McpSchemaCache {
         }
     }
 
+    /// Cached `instructions` for `server`, gated by the config fingerprint like
+    /// [`Self::tools_for`]. Reconfigured servers lose their stale blurb.
+    pub fn instructions_for(&self, server: &str, config: &McpServerConfig) -> Option<&str> {
+        let entry = self.servers.get(server)?;
+        if entry.fingerprint == fingerprint_config(config) {
+            entry.instructions.as_deref()
+        } else {
+            None
+        }
+    }
+
     /// Insert/replace the cached schemas for a server. Returns true if the entry
     /// actually changed (new server, or different fingerprint/tools), so callers
     /// can avoid rewriting the file when nothing changed.
@@ -132,18 +147,25 @@ impl McpSchemaCache {
         server: &str,
         config: &McpServerConfig,
         tools: Vec<McpToolDef>,
+        instructions: Option<String>,
     ) -> bool {
         let fingerprint = fingerprint_config(config);
         let changed = match self.servers.get(server) {
             Some(existing) => {
-                existing.fingerprint != fingerprint || !tool_defs_equal(&existing.tools, &tools)
+                existing.fingerprint != fingerprint
+                    || !tool_defs_equal(&existing.tools, &tools)
+                    || existing.instructions != instructions
             }
             None => true,
         };
         if changed {
             self.servers.insert(
                 server.to_string(),
-                CachedServerSchemas { fingerprint, tools },
+                CachedServerSchemas {
+                    fingerprint,
+                    tools,
+                    instructions,
+                },
             );
         }
         changed
