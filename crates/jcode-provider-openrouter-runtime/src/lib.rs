@@ -198,6 +198,16 @@ fn load_named_profile_api_key(
         .filter(|key| !key.is_empty())
 }
 
+/// Inline `api_key` in a named provider profile goes through the same
+/// `!{cmd}` secret substitution as catalog-applied and env-file values —
+/// a literal `!{...}` must never reach the wire as a credential.
+fn resolve_inline_api_key(profile: &jcode_base::config::NamedProviderConfig) -> Option<String> {
+    profile
+        .api_key
+        .as_deref()
+        .and_then(jcode_provider_env::resolve_secret_value)
+}
+
 fn parse_env_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -1467,7 +1477,7 @@ impl OpenRouterProvider {
         let key_label = key_env.unwrap_or("inline api_key").to_string();
         let key = key_env
             .and_then(|name| load_named_profile_api_key(name, profile))
-            .or_else(|| profile.api_key.clone());
+            .or_else(|| resolve_inline_api_key(profile));
         let auth = match profile.auth {
             jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
                 label: "local endpoint (no auth)".to_string(),

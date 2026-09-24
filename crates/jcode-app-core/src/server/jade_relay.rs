@@ -38,11 +38,13 @@ impl RelayApiConfig {
             return None;
         }
         let api_base = non_empty(safety.jade_relay_api_base.as_deref())?;
-        let token = non_empty(safety.jade_relay_token.as_deref())?;
+        let token = non_empty(safety.jade_relay_token.as_deref())
+            .and_then(jcode_provider_env::resolve_secret_value)?;
         Some(Self {
             api_base: normalize_api_base(api_base),
-            token: token.to_string(),
-            token_id: non_empty(safety.jade_relay_token_id.as_deref()).map(str::to_string),
+            token,
+            token_id: non_empty(safety.jade_relay_token_id.as_deref())
+                .and_then(jcode_provider_env::resolve_secret_value),
             user_id: non_empty(safety.jade_relay_user_id.as_deref()).map(str::to_string),
             device_id: default_device_id(),
         })

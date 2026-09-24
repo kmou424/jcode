@@ -2,6 +2,10 @@ use std::sync::{LazyLock, RwLock};
 
 use jcode_provider_metadata::{is_safe_env_file_name, is_safe_env_key_name};
 
+mod substitution;
+
+pub use substitution::{clear_substitution_cache, expand_environment_string, resolve_secret_value};
+
 /// Fallback resolvers consulted by [`load_api_key_from_env_or_config`] after the
 /// environment and config-file lookups fail. Higher-level crates register
 /// resolvers at startup so this leaf crate does not need to depend on auth.
@@ -79,7 +83,11 @@ fn clean_loaded_value(raw: &str, env_key: &str) -> Option<String> {
             env_key
         ));
     }
-    Some(cleaned.to_string())
+    // A sanitized value that is a whole `!{cmd}` expression is resolved here;
+    // plain values pass through unchanged. On substitution failure the value
+    // collapses to `None` so the caller falls through to the next source
+    // instead of ever exposing the literal as a credential.
+    resolve_secret_value(cleaned)
 }
 
 pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option<String> {

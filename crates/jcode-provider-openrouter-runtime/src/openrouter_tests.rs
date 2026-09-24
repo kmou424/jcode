@@ -3838,3 +3838,34 @@ fn configured_swarm_root_effort_reads_real_config() {
         assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
 }
+
+#[test]
+fn named_openai_compatible_inline_api_key_runs_secret_substitution() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://llm.example.com/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::Bearer,
+        api_key: Some("!{printf named-inline-secret}".to_string()),
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("cmd-key", &profile)
+        .expect("named profile should initialize");
+
+    match &provider.auth {
+        ProviderAuth::AuthorizationBearer { token, .. } => {
+            assert_eq!(token, "named-inline-secret")
+        }
+        other => panic!("expected bearer auth, got {other:?}"),
+    }
+
+    // A malformed `!{` literal must fail closed instead of being sent as the
+    // credential.
+    let malformed = jcode_base::config::NamedProviderConfig {
+        api_key: Some("!{unclosed".to_string()),
+        ..profile
+    };
+    assert!(OpenRouterProvider::new_named_openai_compatible("cmd-key-bad", &malformed).is_err());
+}
