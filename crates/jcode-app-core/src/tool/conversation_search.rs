@@ -288,8 +288,10 @@ fn message_to_text(msg: &Message) -> String {
 fn extract_snippet(text: &str, query: &str) -> String {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.find(query) {
-        let start = pos.saturating_sub(50);
-        let end = (pos + query.len() + 50).min(text.len());
+        // Byte offsets must not split a UTF-8 code point: non-ASCII text
+        // (e.g. CJK at 3 bytes/char) panics on `&str[start..end]` otherwise.
+        let start = floor_char_boundary(text, pos.saturating_sub(50));
+        let end = ceil_char_boundary(text, (pos + query.len() + 50).min(text.len()));
         let mut snippet = text[start..end].to_string();
         if start > 0 {
             snippet = format!("...{}", snippet);
@@ -301,6 +303,28 @@ fn extract_snippet(text: &str, query: &str) -> String {
     } else {
         text.chars().take(100).collect()
     }
+}
+
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut idx = i;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut idx = i;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx.min(s.len())
 }
 
 #[cfg(test)]
@@ -363,6 +387,18 @@ mod tests {
     fn test_tool_name() {
         let tool = create_test_tool();
         assert_eq!(tool.name(), "conversation_search");
+    }
+
+    #[test]
+    fn extract_snippet_handles_multibyte_text() {
+        // Regression: byte-offset slicing must not split UTF-8 code points.
+        let text = "这是一段中文文本，包含 conversation 关键词，后面还有足够长的中文内容来覆盖上下文窗口边界测试。";
+        let snippet = extract_snippet(text, "conversation");
+        assert!(snippet.contains("conversation"));
+
+        let ascii = "prefix conversation suffix with enough trailing text to exceed the window boundary for sure";
+        let snippet = extract_snippet(ascii, "conversation");
+        assert!(snippet.contains("conversation"));
     }
 
     #[tokio::test]
