@@ -3,8 +3,8 @@ use crate::storage;
 use anyhow::{Context, Result};
 use jcode_update_core::{
     BACKGROUND_UPDATE_THRESHOLD, estimate_release_update_duration, estimate_source_update_duration,
-    format_duration_estimate, get_asset_name, summarize_git_pull_failure, update_estimate,
-    verify_asset_checksum_text, version_is_newer,
+    format_duration_estimate, get_asset_name, select_latest_release, summarize_git_pull_failure,
+    update_estimate, verify_asset_checksum_text, version_is_newer,
 };
 pub use jcode_update_core::{
     DownloadProgress, GIT_PULL_DIVERGED_SUMMARY, GitHubAsset, GitHubRelease, PreparedUpdate,
@@ -28,7 +28,9 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
-const GITHUB_REPO: &str = "1jehuang/jcode";
+// The fork publishes its own releases; the updater must look there rather
+// than at upstream so self-updates carry the local patch series.
+const GITHUB_REPO: &str = "kmou424/jcode";
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
@@ -106,6 +108,21 @@ fn current_update_semver() -> &'static str {
 /// Use the base version to reject older releases, then verify that installing
 /// a newer release would not discard commits from the running development build.
 fn release_is_update(release: &GitHubRelease) -> Result<bool> {
+    // A same-tag repackage is still an update when the release targets a
+    // different commit than the one this binary was built from. Release
+    // builds identify themselves by the embedded git hash, so the tag's
+    // target_commitish is a reliable "did the line move" signal. It only
+    // fires on exact semver equality — a strictly older release must never
+    // pull the install backwards.
+    let current = current_update_semver();
+    let same_version = !version_is_newer(&release.tag_name, current)
+        && !version_is_newer(current, &release.tag_name);
+    if same_version
+        && is_release_build()
+        && commitish_is_different_commit(&release.target_commitish, jcode_build_meta::GIT_HASH)
+    {
+        return Ok(true);
+    }
     release_is_update_with(
         &release.tag_name,
         current_update_semver(),
@@ -127,6 +144,20 @@ fn release_is_update_with(
         return Ok(true);
     }
     dev_guard()
+}
+
+/// True when `target_commitish` is a commit sha that does not start with the
+/// build's embedded short hash — i.e. the release tag was recreated on a
+/// different commit. Both sides must look like hex shas: a branch name (or
+/// an unknown/unavailable hash) cannot prove the tag moved, so it is treated
+/// as "same" and the plain semver comparison decides instead.
+fn commitish_is_different_commit(commitish: &str, embedded_hash: &str) -> bool {
+    let commitish = commitish.trim();
+    embedded_hash.len() >= 7
+        && embedded_hash.chars().all(|c| c.is_ascii_hexdigit())
+        && commitish.len() >= embedded_hash.len()
+        && commitish.chars().all(|c| c.is_ascii_hexdigit())
+        && !commitish.starts_with(embedded_hash)
 }
 
 fn source_build_root() -> Result<PathBuf> {
@@ -191,7 +222,10 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
+        // `/releases/latest` follows publish order, which a fixed `latest`
+        // alias tag would always win. List releases and pick the highest
+        // strict-semver tag instead so versioned tags carry the ordering.
+        "https://api.github.com/repos/{}/releases?per_page=100",
         GITHUB_REPO
     );
 
@@ -216,7 +250,8 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         anyhow::bail!("GitHub API error: {}", response.status());
     }
 
-    let release: GitHubRelease = response.json().context("Failed to parse release info")?;
+    let releases: Vec<GitHubRelease> = response.json().context("Failed to parse release list")?;
+    let release = select_latest_release(releases).context("No versioned releases found")?;
     clear_rate_limit_backoff();
     Ok(release)
 }
@@ -241,8 +276,19 @@ fn github_api_request(
     }
 }
 
+/// The per-version patch branch this build tracks. Derived from the package
+/// version (Cargo.toml) rather than git history: `0.88.0` builds belong to
+/// the `kmou424/v0.88.0` line.
+fn fork_patch_branch() -> String {
+    format!("kmou424/v{}", jcode_build_meta::PKG_VERSION)
+}
+
 fn latest_main_sha_blocking() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
+    let branch = fork_patch_branch();
+    let url = format!(
+        "https://api.github.com/repos/{}/commits/{}",
+        GITHUB_REPO, branch
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
@@ -250,12 +296,16 @@ fn latest_main_sha_blocking() -> Result<String> {
 
     let response = github_api_request(&client, &url)
         .send()
-        .context("Failed to check main branch")?;
+        .with_context(|| format!("Failed to check {} branch", branch))?;
     if let Some(error) = rate_limit_error(&response) {
         return Err(error);
     }
     if !response.status().is_success() {
-        anyhow::bail!("GitHub API error checking main: {}", response.status());
+        anyhow::bail!(
+            "GitHub API error checking {}: {}",
+            branch,
+            response.status()
+        );
     }
 
     let commit: serde_json::Value = response.json().context("Failed to parse commit info")?;
@@ -310,11 +360,13 @@ fn verify_asset_checksum_if_available(
 fn synthetic_main_release(latest_sha: &str) -> GitHubRelease {
     GitHubRelease {
         tag_name: format!("main-{}", latest_sha),
+        draft: false,
+        prerelease: false,
         _name: Some(format!("Built from main ({})", latest_sha)),
         _html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
         _published_at: None,
         assets: vec![],
-        _target_commitish: latest_sha.to_string(),
+        target_commitish: latest_sha.to_string(),
     }
 }
 
@@ -682,19 +734,20 @@ fn build_from_source() -> Result<PathBuf> {
 
     if repo_dir.join(".git").exists() {
         // Pull latest
-        crate::logging::info("Main channel: pulling latest from main...");
+        let branch = fork_patch_branch();
+        crate::logging::info(&format!("Main channel: pulling latest from {}...", branch));
         let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
+            .args(["pull", "--ff-only", "origin", &branch])
             .current_dir(&repo_dir)
             .output()
             .context("Failed to run git pull")?;
 
         if !output.status.success() {
-            // If pull fails (e.g. diverged), reset to origin/main
+            // If pull fails (e.g. diverged), reset to the remote patch branch
             let summary = summarize_git_pull_failure(&output.stderr);
             crate::logging::warn(&format!("{}, trying reset", summary));
             let output = std::process::Command::new("git")
-                .args(["fetch", "origin", "main"])
+                .args(["fetch", "origin", &branch])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git fetch")?;
@@ -705,7 +758,7 @@ fn build_from_source() -> Result<PathBuf> {
                 );
             }
             let output = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/main"])
+                .args(["reset", "--hard", &format!("origin/{}", branch)])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git reset")?;
@@ -718,21 +771,39 @@ fn build_from_source() -> Result<PathBuf> {
         }
     } else {
         // Clone
-        crate::logging::info("Main channel: cloning repository...");
+        let branch = fork_patch_branch();
+        crate::logging::info(&format!(
+            "Main channel: cloning repository (branch {})...",
+            branch
+        ));
         let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
         let output = std::process::Command::new("git")
             .args([
-                "clone", "--depth", "1", "--branch", "main", &clone_url, "jcode",
+                "clone", "--depth", "1", "--branch", &branch, &clone_url, "jcode",
             ])
             .current_dir(&build_dir)
             .output()
             .context("Failed to run git clone")?;
 
         if !output.status.success() {
-            anyhow::bail!(
-                "git clone failed: {}",
+            // The patch branch for this version may not exist on the remote
+            // yet; fall back to the default branch.
+            crate::logging::warn(&format!(
+                "git clone --branch {} failed ({}), falling back to default branch",
+                branch,
                 String::from_utf8_lossy(&output.stderr)
-            );
+            ));
+            let output = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", &clone_url, "jcode"])
+                .current_dir(&build_dir)
+                .output()
+                .context("Failed to run git clone")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "git clone failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
     }
 
@@ -1223,6 +1294,33 @@ mod tests {
         assert!(!version_is_newer("0.1.2", "0.1.2"));
         assert!(!version_is_newer("0.1.1", "0.1.2"));
         assert!(!version_is_newer("0.0.9", "0.1.0"));
+    }
+
+    #[test]
+    fn test_commitish_is_different_commit() {
+        // Same commit: tag sha starts with the embedded short hash.
+        assert!(!commitish_is_different_commit(
+            "6b8af47850ef0fd56c73b04765ea7eef3cd5181b",
+            "6b8af4785"
+        ));
+        // Repackaged tag on a different commit counts as an update.
+        assert!(commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            "6b8af4785"
+        ));
+        // A branch name cannot prove the tag moved.
+        assert!(!commitish_is_different_commit("main", "6b8af4785"));
+        // Unknown/empty embedded hash cannot prove it either.
+        assert!(!commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            "unknown"
+        ));
+        assert!(!commitish_is_different_commit(
+            "1c8e7dbdbff44be4f66c71885efd608a70ab798a",
+            ""
+        ));
+        // Commitish shorter than the embedded hash is not comparable.
+        assert!(!commitish_is_different_commit("abc1234", "6b8af4785"));
     }
 
     #[test]

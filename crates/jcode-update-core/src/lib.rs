@@ -31,6 +31,10 @@ pub struct UpdateEstimate {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubRelease {
     pub tag_name: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
     #[serde(rename = "name")]
     pub _name: Option<String>,
     #[serde(rename = "html_url")]
@@ -39,8 +43,7 @@ pub struct GitHubRelease {
     pub _published_at: Option<String>,
     pub assets: Vec<GitHubAsset>,
     #[serde(default)]
-    #[serde(rename = "target_commitish")]
-    pub _target_commitish: String,
+    pub target_commitish: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,11 +142,19 @@ pub fn update_estimate(summary: String, duration: Duration) -> UpdateEstimate {
 }
 
 pub fn get_asset_name() -> &'static str {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(target_os = "linux", target_env = "musl", target_arch = "x86_64"))]
+    {
+        "jcode-linux-musl-x86_64"
+    }
+    #[cfg(all(target_os = "linux", target_env = "musl", target_arch = "aarch64"))]
+    {
+        "jcode-linux-musl-aarch64"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(target_env = "musl")))]
     {
         "jcode-linux-x86_64"
     }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "linux", target_arch = "aarch64", not(target_env = "musl")))]
     {
         "jcode-linux-aarch64"
     }
@@ -397,6 +408,34 @@ pub fn version_is_newer(release: &str, current: &str) -> bool {
     r > c
 }
 
+/// Strictly parse a release tag as `v?MAJOR.MINOR.PATCH` — every component
+/// must be numeric and exactly three components are required. Unlike the
+/// lenient `version_is_newer` parser, tags like `latest`, `nightly`, or
+/// `v0.88.0-rc1` return `None` so they are never update candidates.
+fn strict_release_semver(tag: &str) -> Option<(u32, u32, u32)> {
+    let v = tag.trim().trim_start_matches('v');
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Pick the newest proper release from a `/releases` listing: non-draft,
+/// non-prerelease, strictly semver-tagged, highest version wins. Aliases like
+/// a fixed `latest` tag are skipped because they carry no version ordering.
+pub fn select_latest_release(mut releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    releases
+        .drain(..)
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter_map(|release| strict_release_semver(&release.tag_name).map(|v| (v, release)))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
+}
+
 pub fn format_download_progress_bar(progress: DownloadProgress) -> String {
     let human_downloaded = format_bytes(progress.downloaded);
     let Some(total) = progress.total.filter(|total| *total > 0) else {
@@ -442,6 +481,60 @@ mod tests {
     fn version_comparison_works() {
         assert!(version_is_newer("v0.2.0", "0.1.9"));
         assert!(!version_is_newer("v0.1.0", "0.1.0"));
+    }
+
+    /// The updater selects a tarball by `get_asset_name()`; musl builds must
+    /// ask for the musl-flavored asset so a statically-linked binary is never
+    /// replaced by a glibc one it cannot run (and vice versa).
+    #[test]
+    fn asset_name_matches_target_env() {
+        #[cfg(all(target_os = "linux", target_env = "musl", target_arch = "x86_64"))]
+        assert_eq!(get_asset_name(), "jcode-linux-musl-x86_64");
+        #[cfg(all(target_os = "linux", target_env = "musl", target_arch = "aarch64"))]
+        assert_eq!(get_asset_name(), "jcode-linux-musl-aarch64");
+        #[cfg(all(target_os = "linux", not(target_env = "musl"), target_arch = "x86_64"))]
+        assert_eq!(get_asset_name(), "jcode-linux-x86_64");
+        #[cfg(all(target_os = "linux", not(target_env = "musl"), target_arch = "aarch64"))]
+        assert_eq!(get_asset_name(), "jcode-linux-aarch64");
+    }
+
+    #[test]
+    fn select_latest_release_picks_highest_semver_tag() {
+        let release = |tag: &str| GitHubRelease {
+            tag_name: tag.to_string(),
+            draft: false,
+            prerelease: false,
+            _name: None,
+            _html_url: String::new(),
+            _published_at: None,
+            assets: vec![],
+            target_commitish: String::new(),
+        };
+
+        // The fixed `latest` alias and non-semver tags must lose to any real
+        // versioned release, even when listed first.
+        let picked = select_latest_release(vec![
+            release("latest"),
+            release("v0.88.0"),
+            release("nightly"),
+            release("v0.89.2"),
+            release("v0.89.10"),
+            release("v0.88.0-rc1"),
+        ])
+        .expect("a semver release must exist");
+        assert_eq!(picked.tag_name, "v0.89.10");
+
+        // Drafts and prereleases are never candidates.
+        let mut draft = release("v9.9.9");
+        draft.draft = true;
+        let mut pre = release("v9.9.8");
+        pre.prerelease = true;
+        let picked = select_latest_release(vec![draft, pre, release("v0.1.0")])
+            .expect("v0.1.0 wins when newer tags are draft/prerelease");
+        assert_eq!(picked.tag_name, "v0.1.0");
+
+        assert!(select_latest_release(vec![release("latest")]).is_none());
+        assert!(select_latest_release(vec![]).is_none());
     }
 
     /// Every UI surface renders these on one line, so the summary must stay

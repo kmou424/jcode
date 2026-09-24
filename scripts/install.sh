@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="1jehuang/jcode"
+REPO="kmou424/jcode"
 RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
 IS_WINDOWS=false
 IS_TERMUX=false
@@ -99,10 +99,24 @@ fi
 
 case "$OS" in
   Linux)
+    # glibc-only binaries cannot run on musl hosts (Alpine) or systems without
+    # the ELF interpreter they were linked against (NixOS). Detect both and
+    # pick the statically-linked musl asset instead.
+    linux_needs_musl() {
+      [ -e /etc/NIXOS ] && return 0
+      case "$ARCH" in
+        x86_64)          [ ! -e /lib64/ld-linux-x86-64.so.2 ] ;;
+        aarch64|arm64)   [ ! -e /lib/ld-linux-aarch64.so.1 ] ;;
+        *)               return 1 ;;
+      esac
+    }
     case "$ARCH" in
-      x86_64)  ARTIFACT="jcode-linux-x86_64" ;;
-      aarch64|arm64) ARTIFACT="jcode-linux-aarch64" ;;
-      *)       err "Unsupported Linux architecture: $ARCH" ;;
+      x86_64)
+        if linux_needs_musl; then ARTIFACT="jcode-linux-musl-x86_64"; else ARTIFACT="jcode-linux-x86_64"; fi ;;
+      aarch64|arm64)
+        if linux_needs_musl; then ARTIFACT="jcode-linux-musl-aarch64"; else ARTIFACT="jcode-linux-aarch64"; fi ;;
+      *)
+        err "Unsupported Linux architecture: $ARCH" ;;
     esac
     ;;
   Darwin)
