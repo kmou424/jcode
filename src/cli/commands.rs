@@ -1573,6 +1573,11 @@ pub enum MemorySubcommand {
         overwrite: bool,
     },
     Stats,
+    ProjectShow,
+    ProjectSet {
+        id: String,
+    },
+    Sync,
     ClearTest,
 }
 
@@ -1812,7 +1817,67 @@ async fn run_memory_command_for_dir(
             for (cat, count) in &categories {
                 println!("  {}: {}", cat, count);
             }
+            if let Ok(state) = memory::sync::SyncState::load() {
+                println!("\nSync:");
+                let mut any = false;
+                for (target, t) in &state.targets {
+                    any = true;
+                    println!(
+                        "  {target}: {} | watermark {} | tombstones {}",
+                        if t.dirty { "pending push" } else { "clean" },
+                        if t.watermark.is_empty() {
+                            "(none)"
+                        } else {
+                            t.watermark.as_str()
+                        },
+                        t.tombstones.len()
+                    );
+                }
+                if !any {
+                    println!("  (no sync state yet)");
+                }
+            }
         }
+
+        MemorySubcommand::ProjectShow => {
+            let Some(dir) = project_dir.clone() else {
+                anyhow::bail!("no project directory in this context");
+            };
+            let resolved = memory::project_id::resolve_project_id(&dir);
+            println!("Project id:   {}", resolved.id);
+            println!("Derived from: {}", resolved.source.label());
+            println!("Directory:    {}", resolved.canonical_dir.display());
+            if !resolved.remotes.is_empty() {
+                println!("Remotes:      {}", resolved.remotes.join(", "));
+            }
+            let store = storage::jcode_dir()?
+                .join("memory")
+                .join("projects")
+                .join(format!("{}.json", resolved.id));
+            println!("Local store:  {}", store.display());
+        }
+
+        MemorySubcommand::ProjectSet { id } => {
+            let Some(dir) = project_dir.clone() else {
+                anyhow::bail!("no project directory in this context");
+            };
+            let path = memory::project_id::set_project_id(&dir, &id)?;
+            let resolved = memory::project_id::resolve_project_id(&dir);
+            println!("Wrote {}", path.display());
+            println!(
+                "Project id is now: {} ({})",
+                resolved.id,
+                resolved.source.label()
+            );
+        }
+
+        MemorySubcommand::Sync => match memory::sync::run_sync_cycle(&manager, "cli").await {
+            Ok(report) => println!("{}", report),
+            Err(e) => {
+                eprintln!("Sync failed: {}", e);
+                std::process::exit(1);
+            }
+        },
 
         MemorySubcommand::ClearTest => {
             let test_dir = storage::jcode_dir()?.join("memory").join("test");

@@ -1244,6 +1244,77 @@ impl Default for FeatureConfig {
     }
 }
 
+/// `[memory]` — memory subsystem settings that are not agent tuning.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// `[memory.sync]` — S3-compatible remote replication of memory files.
+    pub sync: MemorySyncConfig,
+}
+
+/// `[memory.sync]` — replicate `~/.jcode/memory` through an S3-compatible
+/// bucket so multiple machines share global and per-project memories.
+/// Local JSON files stay the primary store and offline cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySyncConfig {
+    /// Master switch (default: false). Sync errors never block memory use.
+    pub enabled: bool,
+    /// Backend selector; only `"s3"` exists today.
+    pub backend: String,
+    /// Base endpoint, e.g. `https://s3.example.com`.
+    pub endpoint: String,
+    /// Signing region; MinIO/Garage accept anything (default: "us-east-1").
+    pub region: String,
+    /// Pre-provisioned bucket name. Missing bucket is a loud startup error;
+    /// sync never attempts CreateBucket (least-privilege keys expected).
+    pub bucket: String,
+    /// Optional leading key prefix inside the bucket.
+    pub prefix: String,
+    /// Path-style addressing (`endpoint/bucket/key`). MinIO/Garage need true;
+    /// AWS S3 may use virtual-hosted style (default: true).
+    pub path_style: bool,
+    /// S3 access key; supports whole-value `!{cmd}` secret substitution.
+    pub access_key: String,
+    /// S3 secret key; supports whole-value `!{cmd}` secret substitution.
+    pub secret_key: String,
+    /// Scopes that participate: "global" and/or "project".
+    pub scopes: Vec<String>,
+    /// Local change poll: stat memory files on this cadence and push diffs
+    /// (default: 10s). Local stat costs no network traffic.
+    pub push_poll_secs: u64,
+    /// Remote ops-journal poll interval (default: 120s).
+    pub pull_interval_secs: u64,
+    /// Full `entries/` reconcile interval (default: 3600s).
+    pub reconcile_interval_secs: u64,
+    /// Pull once when the daemon starts (default: true).
+    pub pull_on_start: bool,
+    /// Days ops records and tombstones are retained before GC (default: 90).
+    pub tombstone_retention_days: u64,
+}
+
+impl Default for MemorySyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: "s3".to_string(),
+            endpoint: String::new(),
+            region: "us-east-1".to_string(),
+            bucket: String::new(),
+            prefix: String::new(),
+            path_style: true,
+            access_key: String::new(),
+            secret_key: String::new(),
+            scopes: vec!["global".to_string(), "project".to_string()],
+            push_poll_secs: 10,
+            pull_interval_secs: 120,
+            reconcile_interval_secs: 3600,
+            pull_on_start: true,
+            tombstone_retention_days: 90,
+        }
+    }
+}
+
 /// Search engine used by the websearch tool.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]

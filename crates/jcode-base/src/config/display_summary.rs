@@ -68,6 +68,7 @@ impl Config {
 **Features:**
 - Check updates: {}
 - Memory: {}
+- Memory sync: {}
 - Swarm: {}
 - Auto-poke: {}
 - Message timestamps: {}
@@ -227,6 +228,16 @@ impl Config {
             },
             self.features.check_updates,
             self.features.memory,
+            if self.memory.sync.enabled && self.memory.sync.backend == "s3" {
+                format!(
+                    "enabled (s3, bucket {} @ {}, pull {}s)",
+                    self.memory.sync.bucket,
+                    self.memory.sync.endpoint,
+                    self.memory.sync.pull_interval_secs
+                )
+            } else {
+                "disabled".to_string()
+            },
             self.features.swarm,
             self.features.auto_poke,
             self.features.message_timestamps,

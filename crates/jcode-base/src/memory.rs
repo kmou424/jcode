@@ -27,8 +27,11 @@ mod activity;
 mod cache;
 #[path = "memory/pending.rs"]
 mod pending;
+pub mod project_id;
 #[path = "memory_prompt.rs"]
 mod prompt_support;
+pub mod s3;
+pub mod sync;
 
 pub use crate::memory_types::{
     MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement, TrustLevel,
@@ -241,6 +244,21 @@ impl MemoryManager {
         self.project_dir.clone()
     }
 
+    /// Public accessor for the bound project directory (memory sync targets).
+    pub fn project_dir(&self) -> Option<PathBuf> {
+        self.project_dir.clone()
+    }
+
+    /// File path of the global memory graph.
+    pub fn global_graph_path(&self) -> Result<Option<PathBuf>> {
+        Ok(Some(self.global_memory_path()?))
+    }
+
+    /// File path of this project's memory graph (None when no project dir).
+    pub fn project_graph_path(&self) -> Result<Option<PathBuf>> {
+        self.project_memory_path()
+    }
+
     fn project_memory_path(&self) -> Result<Option<PathBuf>> {
         // In test mode, use test directory
         if self.test_mode {
@@ -254,16 +272,12 @@ impl MemoryManager {
             None => return Ok(None),
         };
 
-        let project_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            project_dir.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        };
-
         let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
-        Ok(Some(memory_dir.join(format!("{}.json", project_hash))))
+        let resolved = project_id::resolve_project_id(&project_dir);
+        // One-time rename of the legacy <path-hash>.json store to the
+        // repo-stable id; remote objects for the old key are left to retention.
+        project_id::migrate_legacy_store(&project_dir, &resolved.id)?;
+        Ok(Some(memory_dir.join(format!("{}.json", resolved.id))))
     }
 
     fn legacy_notes_path(&self) -> Result<Option<PathBuf>> {
@@ -1330,6 +1344,9 @@ impl MemoryManager {
             storage::write_json(&path, graph)?;
             if !self.test_mode {
                 cache_graph(path, graph);
+                if let Some(dir) = self.get_project_dir() {
+                    sync::mark_dirty(&project_id::resolve_project_id(&dir).id);
+                }
             }
         }
         Ok(())
@@ -1341,6 +1358,7 @@ impl MemoryManager {
         storage::write_json(&path, graph)?;
         if !self.test_mode {
             cache_graph(path, graph);
+            sync::mark_dirty("global");
         }
         Ok(())
     }

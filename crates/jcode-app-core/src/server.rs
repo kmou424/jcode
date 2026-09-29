@@ -1429,6 +1429,68 @@ impl Server {
             });
         }
 
+        // Memory S3 sync: tiered tick — a fast local-mtime poll decides when
+        // the heavier pull/reconcile stages run (engine-side intervals). The
+        // daemon owns the `global` scope plus every project id catalogued via
+        // local project files, sync-state, and the remote project registry.
+        if jcode_base::memory::sync::sync_enabled(crate::config::config()) {
+            let poll_secs = crate::config::config().memory.sync.push_poll_secs.max(5);
+            let pull_on_start = crate::config::config().memory.sync.pull_on_start;
+            tokio::spawn(async move {
+                // Bucket HEAD + secret resolution are blocking; keep them off
+                // the async thread and give up quietly on misconfiguration so
+                // the rest of the server keeps working.
+                let engine = match tokio::task::spawn_blocking(|| {
+                    jcode_base::memory::sync::SyncEngine::from_config(
+                        crate::config::config().memory.sync.clone(),
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(engine)) => engine,
+                    Ok(Err(e)) => {
+                        crate::logging::warn(&format!("memory sync disabled, bad config: {e:#}"));
+                        return;
+                    }
+                    Err(e) => {
+                        crate::logging::warn(&format!("memory sync setup panicked: {e}"));
+                        return;
+                    }
+                };
+                let manager = jcode_base::memory::MemoryManager::new();
+                let engine = std::sync::Arc::new(engine);
+                let run_tick = move |origin: &'static str| {
+                    let engine = std::sync::Arc::clone(&engine);
+                    let manager = manager.clone();
+                    tokio::task::spawn(async move {
+                        let report =
+                            tokio::task::spawn_blocking(move || engine.tick(&manager)).await;
+                        match report {
+                            Ok(report) if !report.errors.is_empty() => {
+                                crate::logging::warn(&format!(
+                                    "memory sync ({origin}) errors: {:?}",
+                                    report.errors
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(e) => crate::logging::warn(&format!(
+                                "memory sync ({origin}) panicked: {e}"
+                            )),
+                        }
+                    });
+                };
+                if pull_on_start {
+                    run_tick("pull_on_start");
+                }
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    run_tick("daemon tick");
+                }
+            });
+        }
+
         // Spawn the background ambient/schedule loop.
         if let Some(ref runner) = self.ambient_runner {
             let ambient_handle = runner.clone();

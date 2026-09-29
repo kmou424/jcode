@@ -1158,8 +1158,25 @@ pub(crate) enum MemoryCommand {
     /// Show memory statistics
     Stats,
 
+    /// Show the resolved project id for this directory and how it was derived
+    Project {
+        #[command(subcommand)]
+        action: Option<MemoryProjectAction>,
+    },
+
+    /// Force a memory sync cycle now (push pending changes + pull remote ops)
+    Sync,
+
     /// Clear test memory storage (used by debug sessions)
     ClearTest,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum MemoryProjectAction {
+    /// Bind this directory to a specific project id. Writes
+    /// `.jcode/memory-project-id` for repo roots, else
+    /// `~/.jcode/memory/project-map.json`.
+    Set { id: String },
 }
 
 #[cfg(test)]

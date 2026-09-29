@@ -764,6 +764,13 @@ fn map_memory_subcommand(subcmd: MemoryCommand) -> commands::MemorySubcommand {
             overwrite,
         },
         MemoryCommand::Stats => commands::MemorySubcommand::Stats,
+        MemoryCommand::Project { action } => match action {
+            None => commands::MemorySubcommand::ProjectShow,
+            Some(crate::cli::args::MemoryProjectAction::Set { id }) => {
+                commands::MemorySubcommand::ProjectSet { id }
+            }
+        },
+        MemoryCommand::Sync => commands::MemorySubcommand::Sync,
         MemoryCommand::ClearTest => commands::MemorySubcommand::ClearTest,
     }
 }
