@@ -30,6 +30,10 @@ pub struct SelfDevBuildCommand {
     pub program: String,
     pub args: Vec<String>,
     pub display: String,
+    /// Extra environment the build command needs (musl C toolchain, vendored
+    /// dependency flags). Applied by the caller that spawns `program`.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

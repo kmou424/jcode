@@ -75,6 +75,107 @@ pub fn binary_name() -> &'static str {
 
 pub const SELFDEV_CARGO_PROFILE: &str = "selfdev";
 
+/// NixOS marks installations with `/etc/NIXOS`. NixOS has no FHS glibc
+/// loader, so binaries linked against the system glibc cannot run there;
+/// selfdev builds on such hosts target musl and link statically instead.
+pub fn nixos_host() -> bool {
+    cfg!(target_os = "linux") && Path::new("/etc/NIXOS").exists()
+}
+
+/// The Cargo target triple `selfdev build` compiles for, when the host calls
+/// for a non-default one.
+///
+/// `JCODE_SELFDEV_TARGET` overrides detection (any rustc target triple); an
+/// empty value forces the host default. Otherwise NixOS hosts build for musl
+/// so the produced dev binary runs where it was built.
+pub fn selfdev_cargo_target_triple() -> Option<String> {
+    selfdev_cargo_target_triple_with(
+        std::env::var("JCODE_SELFDEV_TARGET").ok().as_deref(),
+        nixos_host(),
+    )
+}
+
+fn selfdev_cargo_target_triple_with(env_target: Option<&str>, nixos: bool) -> Option<String> {
+    if let Some(value) = env_target {
+        let value = value.trim();
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    nixos.then(|| format!("{}-unknown-linux-musl", std::env::consts::ARCH))
+}
+
+fn is_musl_triple(triple: &str) -> bool {
+    triple.split('-').any(|part| part == "musl")
+}
+
+/// Cargo flags needed on top of the usual `build --profile selfdev` when
+/// building for a non-host target. musl targets also need the vendored
+/// openssl build — there is no system OpenSSL to link a static musl binary
+/// against.
+fn selfdev_target_args(cargo_target: Option<&str>) -> Vec<String> {
+    match cargo_target {
+        Some(triple) if is_musl_triple(triple) => vec![
+            "--target".to_string(),
+            triple.to_string(),
+            "--features".to_string(),
+            "linux-compat-vendored-openssl".to_string(),
+        ],
+        Some(triple) => vec!["--target".to_string(), triple.to_string()],
+        None => Vec::new(),
+    }
+}
+
+/// Shell-side form of `selfdev_target_args` for the dev_cargo.sh wrapper and
+/// the displayed command line.
+fn selfdev_target_suffix(cargo_target: Option<&str>) -> String {
+    let args = selfdev_target_args(cargo_target);
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    }
+}
+
+/// The `CC_<triple>` env var name `cc`-family build scripts read.
+fn cc_env_var(triple: &str) -> String {
+    format!("CC_{}", triple.to_uppercase().replace('-', "_"))
+}
+
+/// Candidate musl C compilers, in probe order. `musl-gcc` is the generic
+/// wrapper shipped by musl distros; `<arch>-linux-musl-gcc` is the cross
+/// prefix used by musl-cross/alpine packaging; `<triple>-gcc` is the nixpkgs
+/// cross-stdenv naming (`x86_64-unknown-linux-musl-gcc`).
+fn musl_cc_candidates(triple: &str) -> Vec<String> {
+    let arch = triple.split('-').next().unwrap_or("x86_64");
+    let mut candidates = Vec::new();
+    // `musl-gcc` compiles for the host architecture's musl; it is only usable
+    // when the requested target arch is the host arch.
+    if arch == std::env::consts::ARCH {
+        candidates.push("musl-gcc".to_string());
+    }
+    candidates.push(format!("{arch}-linux-musl-gcc"));
+    candidates.push(format!("{triple}-gcc"));
+    candidates
+}
+
+fn command_on_path(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// The musl C toolchain for `-sys` crates (vendored openssl, ring, ...).
+/// Returns the first candidate that runs; `None` leaves Cargo's defaults in
+/// place so the compiler error names what is missing.
+fn detect_musl_cc(triple: &str) -> Option<String> {
+    musl_cc_candidates(triple)
+        .into_iter()
+        .find(|cc| command_on_path(cc))
+}
+
 /// Resolve a channel/launcher binary path to the file that actually runs.
 ///
 /// Release archives install a tiny `jcode` wrapper script alongside the real
@@ -139,7 +240,20 @@ pub fn release_binary_path(repo_dir: &Path) -> PathBuf {
 }
 
 pub fn selfdev_binary_path(repo_dir: &Path) -> PathBuf {
-    profile_binary_path(repo_dir, SELFDEV_CARGO_PROFILE)
+    selfdev_binary_path_for_target(repo_dir, selfdev_cargo_target_triple().as_deref())
+}
+
+/// The binary path for a selfdev build of `cargo_target` — non-host targets
+/// land under `target/<triple>/<profile>/` instead of `target/<profile>/`.
+fn selfdev_binary_path_for_target(repo_dir: &Path, cargo_target: Option<&str>) -> PathBuf {
+    match cargo_target {
+        Some(triple) => repo_dir
+            .join("target")
+            .join(triple)
+            .join(SELFDEV_CARGO_PROFILE)
+            .join(binary_name()),
+        None => profile_binary_path(repo_dir, SELFDEV_CARGO_PROFILE),
+    }
 }
 
 fn binary_mtime(path: &Path) -> Option<SystemTime> {
@@ -171,13 +285,19 @@ pub fn selfdev_build_command_for_target(
     repo_dir: &Path,
     target: SelfDevBuildTarget,
 ) -> SelfDevBuildCommand {
-    selfdev_build_command_for_target_on_platform(repo_dir, target, cfg!(windows))
+    selfdev_build_command_for_target_on_platform(
+        repo_dir,
+        target,
+        cfg!(windows),
+        selfdev_cargo_target_triple().as_deref(),
+    )
 }
 
 fn selfdev_build_command_for_target_on_platform(
     repo_dir: &Path,
     target: SelfDevBuildTarget,
     is_windows: bool,
+    cargo_target: Option<&str>,
 ) -> SelfDevBuildCommand {
     let target = match target {
         SelfDevBuildTarget::Auto => infer_selfdev_build_target(repo_dir),
@@ -187,6 +307,8 @@ fn selfdev_build_command_for_target_on_platform(
         SelfDevBuildTarget::Tui => vec![("jcode", "jcode")],
         SelfDevBuildTarget::All | SelfDevBuildTarget::Auto => vec![("jcode", "jcode")],
     };
+    let env = selfdev_build_env(cargo_target);
+    let target_suffix = selfdev_target_suffix(cargo_target);
     let wrapper = repo_dir.join("scripts").join("dev_cargo.sh");
     // `bash` on Windows may resolve to WSL, which cannot use the native Rust
     // toolchain or produce the Windows executable we publish. Avoid both that
@@ -197,12 +319,13 @@ fn selfdev_build_command_for_target_on_platform(
             .iter()
             .map(|(package, binary)| {
                 format!(
-                    "{} build --profile {} -p {} --bin {}{}",
+                    "{} build --profile {} -p {} --bin {}{}{}",
                     shell_escape(&script),
                     SELFDEV_CARGO_PROFILE,
                     package,
                     binary,
-                    ""
+                    "",
+                    target_suffix,
                 )
             })
             .collect::<Vec<_>>()
@@ -210,16 +333,18 @@ fn selfdev_build_command_for_target_on_platform(
         return SelfDevBuildCommand {
             program: "bash".to_string(),
             args: vec!["-lc".to_string(), command],
-            display: display_build_command("scripts/dev_cargo.sh", &specs),
+            display: display_build_command("scripts/dev_cargo.sh", &specs, &target_suffix),
+            env,
         };
     }
 
-    let command = display_build_command("cargo", &specs);
+    let command = display_build_command("cargo", &specs, &target_suffix);
     if is_windows {
         return SelfDevBuildCommand {
             program: "cargo".to_string(),
-            args: cargo_build_args(&specs),
+            args: cargo_build_args(&specs, cargo_target),
             display: command,
+            env,
         };
     }
 
@@ -227,10 +352,31 @@ fn selfdev_build_command_for_target_on_platform(
         program: "bash".to_string(),
         args: vec!["-lc".to_string(), command.clone()],
         display: command,
+        env,
     }
 }
 
-fn cargo_build_args(specs: &[(&str, &str)]) -> Vec<String> {
+/// Extra environment the build command needs for `cargo_target`. musl builds
+/// point the C toolchain at a musl cross compiler so `-sys` crates build
+/// against musl libc; non-musl and host builds need nothing.
+fn selfdev_build_env(cargo_target: Option<&str>) -> Vec<(String, String)> {
+    let Some(triple) = cargo_target else {
+        return Vec::new();
+    };
+    if !is_musl_triple(triple) {
+        return Vec::new();
+    }
+    let Some(cc) = detect_musl_cc(triple) else {
+        return Vec::new();
+    };
+    vec![
+        ("CC".to_string(), cc.clone()),
+        ("TARGET_CC".to_string(), cc.clone()),
+        (cc_env_var(triple), cc),
+    ]
+}
+
+fn cargo_build_args(specs: &[(&str, &str)], cargo_target: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "build".to_string(),
         "--profile".to_string(),
@@ -244,16 +390,17 @@ fn cargo_build_args(specs: &[(&str, &str)]) -> Vec<String> {
             (*binary).to_string(),
         ]);
     }
+    args.extend(selfdev_target_args(cargo_target));
     args
 }
 
-fn display_build_command(program: &str, specs: &[(&str, &str)]) -> String {
+fn display_build_command(program: &str, specs: &[(&str, &str)], target_suffix: &str) -> String {
     specs
         .iter()
         .map(|(package, binary)| {
             format!(
-                "{} build --profile {} -p {} --bin {}{}",
-                program, SELFDEV_CARGO_PROFILE, package, binary, ""
+                "{} build --profile {} -p {} --bin {}{}{}",
+                program, SELFDEV_CARGO_PROFILE, package, binary, "", target_suffix
             )
         })
         .collect::<Vec<_>>()
@@ -308,6 +455,7 @@ pub fn run_selfdev_build(repo_dir: &Path) -> Result<SelfDevBuildCommand> {
     let build = selfdev_build_command(repo_dir);
     let status = Command::new(&build.program)
         .args(&build.args)
+        .envs(build.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(repo_dir)
         .status()?;
 
@@ -683,6 +831,7 @@ mod tests {
             repo.path(),
             SelfDevBuildTarget::Tui,
             true,
+            None,
         );
 
         assert_eq!(command.program, "cargo");
@@ -715,6 +864,7 @@ mod tests {
             repo.path(),
             SelfDevBuildTarget::Tui,
             false,
+            None,
         );
 
         assert_eq!(command.program, "bash");
@@ -734,6 +884,7 @@ mod tests {
             repo.path(),
             SelfDevBuildTarget::All,
             true,
+            None,
         );
 
         assert_eq!(
@@ -780,6 +931,122 @@ mod tests {
             porcelain_path("R  old/path.rs -> crates/jcode-tui/src/moved.rs"),
             "crates/jcode-tui/src/moved.rs"
         );
+    }
+
+    #[test]
+    fn nixos_hosts_build_for_musl_unless_env_overrides() {
+        let expected_musl = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
+        assert_eq!(
+            selfdev_cargo_target_triple_with(None, true).as_deref(),
+            Some(expected_musl.as_str())
+        );
+        assert_eq!(selfdev_cargo_target_triple_with(None, false), None);
+        // An explicit triple wins over NixOS detection.
+        assert_eq!(
+            selfdev_cargo_target_triple_with(Some("aarch64-unknown-linux-gnu"), true).as_deref(),
+            Some("aarch64-unknown-linux-gnu")
+        );
+        // An empty override explicitly requests the host default.
+        assert_eq!(selfdev_cargo_target_triple_with(Some("   "), true), None);
+    }
+
+    #[test]
+    fn musl_target_adds_target_flag_vendored_openssl_and_triple_binary_dir() {
+        let repo = repo_fixture(false);
+        let scripts = repo.path().join("scripts");
+        std::fs::create_dir_all(&scripts).expect("scripts dir");
+        std::fs::write(scripts.join("dev_cargo.sh"), "#!/usr/bin/env bash\n").expect("wrapper");
+
+        let triple = "x86_64-unknown-linux-musl";
+        let command = selfdev_build_command_for_target_on_platform(
+            repo.path(),
+            SelfDevBuildTarget::Tui,
+            false,
+            Some(triple),
+        );
+
+        let command_line = command
+            .args
+            .iter()
+            .fold(command.display.clone(), |acc, arg| format!("{acc} {arg}"));
+        assert!(command_line.contains(&format!("--target {triple}")));
+        assert!(command_line.contains("--features linux-compat-vendored-openssl"));
+
+        assert_eq!(
+            selfdev_binary_path_for_target(repo.path(), Some(triple)),
+            repo.path()
+                .join("target")
+                .join(triple)
+                .join(SELFDEV_CARGO_PROFILE)
+                .join(binary_name())
+        );
+        assert_eq!(
+            selfdev_binary_path_for_target(repo.path(), None),
+            repo.path()
+                .join("target")
+                .join(SELFDEV_CARGO_PROFILE)
+                .join(binary_name())
+        );
+    }
+
+    #[test]
+    fn non_musl_target_adds_only_the_target_flag() {
+        let repo = repo_fixture(false);
+        let command = selfdev_build_command_for_target_on_platform(
+            repo.path(),
+            SelfDevBuildTarget::Tui,
+            true,
+            Some("x86_64-pc-windows-msvc"),
+        );
+        assert_eq!(
+            command.args,
+            [
+                "build",
+                "--profile",
+                "selfdev",
+                "-p",
+                "jcode",
+                "--bin",
+                "jcode",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ]
+        );
+        assert!(command.env.is_empty());
+    }
+
+    #[test]
+    fn musl_cc_candidates_cover_distro_and_nixpkgs_names_but_never_wrong_arch() {
+        let triple = "x86_64-unknown-linux-musl";
+        let candidates = musl_cc_candidates(triple);
+        assert!(candidates.iter().any(|cc| cc == "x86_64-linux-musl-gcc"));
+        assert!(
+            candidates
+                .iter()
+                .any(|cc| cc == "x86_64-unknown-linux-musl-gcc")
+        );
+        if std::env::consts::ARCH == "x86_64" {
+            assert_eq!(candidates.first().map(String::as_str), Some("musl-gcc"));
+        } else {
+            assert!(!candidates.iter().any(|cc| cc == "musl-gcc"));
+        }
+
+        // A target arch different from the host must never fall back to the
+        // host-arch `musl-gcc` wrapper.
+        let other = if std::env::consts::ARCH == "x86_64" {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let cross = musl_cc_candidates(&format!("{other}-unknown-linux-musl"));
+        assert!(!cross.iter().any(|cc| cc == "musl-gcc"));
+        assert!(
+            cross
+                .iter()
+                .any(|cc| cc == &format!("{other}-unknown-linux-musl-gcc"))
+        );
+
+        assert_eq!(cc_env_var(triple), "CC_X86_64_UNKNOWN_LINUX_MUSL");
     }
 
     #[test]
