@@ -383,6 +383,22 @@ impl App {
         self.apply_prompt_history_search_preview();
     }
 
+    /// Paste into the history-search query. The query is a single-line
+    /// filter, so embedded newlines collapse to spaces like the other
+    /// overlay text fields.
+    pub(super) fn handle_prompt_history_search_paste(&mut self, text: &str) {
+        let Some(state) = self.prompt_history_search.as_mut() else {
+            return;
+        };
+        let collapsed = text.lines().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            return;
+        }
+        state.query.push_str(&collapsed);
+        state.selected = 0;
+        self.refresh_prompt_history_search_matches();
+    }
+
     /// Render-friendly snapshot of the search overlay for the UI layer.
     pub(crate) fn prompt_history_search_view(&self) -> Option<crate::tui::PromptHistorySearchView> {
         let state = self.prompt_history_search.as_ref()?;

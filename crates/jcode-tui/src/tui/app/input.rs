@@ -655,6 +655,32 @@ mod paste_guard;
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::image_media_type;
 
+/// Route a terminal paste to whichever overlay currently owns text input.
+/// Returns `true` when an overlay consumed the paste — the caller then
+/// skips the composer `handle_paste` so pasted text cannot leak into the
+/// hidden input line. Order matches `handle_modal_key` precedence: the
+/// blocking questionnaire first, then picker overlays with their own text
+/// fields (session-picker search, interactive picker filter, prompt-history
+/// query). Overlays that merely scroll or select have no text target and
+/// fall through.
+pub(super) fn route_overlay_paste(app: &mut App, text: &str) -> bool {
+    if app.prompt_history_search.is_some() {
+        app.handle_prompt_history_search_paste(text);
+        return true;
+    }
+    if app.handle_ask_user_question_paste(text) {
+        return true;
+    }
+    if let Some(picker_cell) = app.session_picker_overlay.as_ref() {
+        picker_cell.borrow_mut().handle_overlay_paste(text);
+        return true;
+    }
+    if app.handle_inline_interactive_paste(text) {
+        return true;
+    }
+    false
+}
+
 pub(super) fn handle_paste(app: &mut App, text: String) {
     if app.append_ssh_login_input(&text) {
         return;
@@ -939,7 +965,9 @@ impl App {
                 true
             }
             ClipboardPasteContent::Text(text) => {
-                handle_text_paste(self, text);
+                if !route_overlay_paste(self, &text) {
+                    handle_text_paste(self, text);
+                }
                 true
             }
             ClipboardPasteContent::Empty => {
@@ -952,7 +980,9 @@ impl App {
                     }
                     ClipboardPasteKind::ImageUrl { fallback_text } => {
                         if let Some(text) = fallback_text {
-                            handle_text_paste(self, text);
+                            if !route_overlay_paste(self, &text) {
+                                handle_text_paste(self, text);
+                            }
                         } else {
                             self.set_status_notice("Failed to download image");
                         }
@@ -966,7 +996,9 @@ impl App {
                 } = result.kind
                 {
                     self.set_status_notice(message);
-                    handle_text_paste(self, text);
+                    if !route_overlay_paste(self, &text) {
+                        handle_text_paste(self, text);
+                    }
                 } else {
                     self.set_status_notice(message);
                 }
@@ -2670,6 +2702,23 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    // Clipboard-paste chord inside a text-owning overlay: kick off the async
+    // clipboard read here (the completion event routes through
+    // `route_overlay_paste` and lands in the overlay's field, not the
+    // composer). Read-only overlays keep their normal key routing.
+    if is_clipboard_paste_shortcut(code, modifiers)
+        && (app.has_ask_user_question()
+            || app.session_picker_overlay.is_some()
+            || app
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(|p| !p.preview)
+            || app.prompt_history_search.is_some())
+    {
+        paste_from_clipboard(app);
+        return Ok(true);
+    }
+
     if app.prompt_history_search.is_some() {
         app.handle_prompt_history_search_key(code, modifiers);
         return Ok(true);

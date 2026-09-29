@@ -531,3 +531,61 @@ fn notes_editor_renders_as_overlay_when_options_overflow() {
         "notes editor should be a bordered overlay: {note_row:?}"
     );
 }
+
+/// Bracketed paste while the notes editor is open must land in the note
+/// draft — before this was routed the paste fell through to the hidden
+/// composer (issue reported by user).
+#[test]
+fn paste_into_notes_editor_inserts_text() {
+    let mut state = state_with(vec![question("Pick?", vec![option("A"), option("B")])]);
+    key(&mut state, KeyCode::Char('n'));
+    assert!(state.editing_notes);
+
+    state.handle_paste("pasted note");
+    assert_eq!(state.notes_text, "pasted note");
+
+    // Newlines collapse to spaces (single-line editor).
+    state.handle_paste("line1\nline2\r\nline3");
+    assert_eq!(state.notes_text, "pasted noteline1 line2 line3");
+}
+
+/// Pasting in select mode jumps to the free-text row and types there —
+/// same behavior as pressing a printable key.
+#[test]
+fn paste_in_select_mode_jumps_to_free_text_row() {
+    let mut state = state_with(vec![question("Pick?", vec![option("A"), option("B")])]);
+    assert!(!state.editing_custom);
+    assert!(!state.editing_notes);
+
+    state.handle_paste("custom answer");
+    assert!(state.editing_custom);
+    assert_eq!(state.custom_text, "custom answer");
+    // Row cursor moved to the Custom row (last row).
+    assert_eq!(state.row_index, state.row_count() - 1);
+}
+
+/// While already editing the free-text row, paste appends at the cursor.
+#[test]
+fn paste_appends_in_custom_editor() {
+    let mut state = state_with(vec![question("Pick?", vec![option("A")])]);
+    key(&mut state, KeyCode::Char('x')); // typing opens the custom editor
+    state.handle_paste("yz");
+    assert_eq!(state.custom_text, "xyz");
+}
+
+/// On the submit tab, paste is swallowed instead of leaking into the
+/// hidden composer.
+#[test]
+fn paste_on_submit_tab_is_consumed() {
+    let mut state = state_with(vec![
+        question("Q1?", vec![option("A")]),
+        question("Q2?", vec![option("B")]),
+    ]);
+    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::Tab); // submit tab
+    assert!(state.on_submit_tab());
+
+    state.handle_paste("nope");
+    assert!(!state.editing_notes);
+    assert!(!state.editing_custom);
+}

@@ -1326,6 +1326,20 @@ impl SessionPicker {
     /// - `Some(PickerResult::RestoreCrashedGroup)` if user chose crash-group restore
     /// - `None` if the overlay should close (Esc/q/Ctrl+C)
     /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
+    /// Route a terminal paste into the picker. Pasting while the overlay is
+    /// open means the user wants to filter — enter (or stay in) the search
+    /// field and append the flattened text there rather than leaking the
+    /// paste into the composer hidden behind the overlay.
+    pub fn handle_overlay_paste(&mut self, text: &str) {
+        let text = text.lines().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return;
+        }
+        self.search_active = true;
+        self.search_query.push_str(&text);
+        self.rebuild_items();
+    }
+
     pub fn handle_overlay_key(
         &mut self,
         code: KeyCode,

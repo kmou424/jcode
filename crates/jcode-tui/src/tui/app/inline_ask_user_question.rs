@@ -16,6 +16,18 @@ use super::App;
 use crate::tui::{AskUserQuestionOutcome, AskUserQuestionRow, InlineAskUserQuestionState};
 
 impl App {
+    /// Route a terminal paste into the questionnaire while it is open.
+    /// Returns `true` whenever the panel is up — pasting must never fall
+    /// through to the hidden composer (notes/free-text absorb the text;
+    /// the submit tab simply swallows it).
+    pub(super) fn handle_ask_user_question_paste(&mut self, text: &str) -> bool {
+        let Some(state) = self.inline_ask_user_question_state.as_mut() else {
+            return false;
+        };
+        state.handle_paste(text);
+        true
+    }
+
     /// Open the questionnaire for a server-originated pending request.
     pub(super) fn open_ask_user_question(
         &mut self,
@@ -55,6 +67,27 @@ impl App {
 }
 
 impl InlineAskUserQuestionState {
+    /// Route a terminal paste into the questionnaire. Text goes to whichever
+    /// editor currently owns typing: the notes draft, the free-text draft, or
+    /// (from select mode) the free-text row after jumping to it — matching how
+    /// typing a printable key behaves. On the submit tab the paste is consumed
+    /// so nothing can leak into the hidden composer.
+    pub(crate) fn handle_paste(&mut self, text: &str) {
+        // The editors are single-line; pasted newlines become spaces
+        // (`lines()` collapses `\r\n` into one break).
+        let text = text.lines().collect::<Vec<_>>().join(" ");
+        if self.editing_notes {
+            insert_str(&mut self.notes_text, &mut self.notes_cursor, &text);
+            return;
+        }
+        if !self.on_submit_tab() && self.row_count() > 0 {
+            // Last row is always the free-text Custom row.
+            self.row_index = self.row_count() - 1;
+            self.editing_custom = true;
+            insert_str(&mut self.custom_text, &mut self.custom_cursor, &text);
+        }
+    }
+
     /// Route one key through the questionnaire state machine: notes editor,
     /// free-text editor, submit tab, then the select-mode bindings.
     pub(crate) fn handle_key(
@@ -494,6 +527,12 @@ fn insert_char(text: &mut String, cursor: &mut usize, c: char) {
     let byte = char_to_byte(text, *cursor);
     text.insert(byte, c);
     *cursor += 1;
+}
+
+fn insert_str(text: &mut String, cursor: &mut usize, s: &str) {
+    for c in s.chars() {
+        insert_char(text, cursor, c);
+    }
 }
 
 fn delete_char_before(text: &mut String, cursor: &mut usize) {

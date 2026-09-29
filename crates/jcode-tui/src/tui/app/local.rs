@@ -427,7 +427,9 @@ fn apply_terminal_event(
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_interaction();
-            app.handle_paste(text);
+            if !super::input::route_overlay_paste(app, &text) {
+                app.handle_paste(text);
+            }
             Ok(true)
         }
         Some(Ok(Event::Mouse(mouse))) => {

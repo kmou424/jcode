@@ -3587,6 +3587,31 @@ impl App {
         }
     }
 
+    /// Route a terminal paste into the picker's filter field (same rules as
+    /// typing: whitespace becomes a token separator, single trailing space
+    /// only). Preview mode keeps the composer as the text target, so the
+    /// caller falls through to the normal paste path there.
+    pub(super) fn handle_inline_interactive_paste(&mut self, text: &str) -> bool {
+        let Some(ref mut picker) = self.inline_interactive_state else {
+            return false;
+        };
+        if picker.preview {
+            return false;
+        }
+        let collapsed = text.lines().collect::<Vec<_>>().join(" ");
+        let mut changed = false;
+        for c in collapsed.chars() {
+            if !c.is_whitespace() || (!picker.filter.is_empty() && !picker.filter.ends_with(' ')) {
+                picker.filter.push(if c.is_whitespace() { ' ' } else { c });
+                changed = true;
+            }
+        }
+        if changed {
+            Self::apply_inline_interactive_filter(picker);
+        }
+        true
+    }
+
     pub(super) fn handle_inline_interactive_key(
         &mut self,
         code: KeyCode,

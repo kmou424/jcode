@@ -701,7 +701,9 @@ async fn apply_terminal_event(
         Some(Ok(Event::Paste(text))) => {
             input_attribution.event = Some(format!("paste:{}", text.len()));
             app.note_client_interaction();
-            app.handle_paste(text);
+            if !super::input::route_overlay_paste(app, &text) {
+                app.handle_paste(text);
+            }
             needs_redraw = true;
         }
         Some(Ok(Event::Mouse(mouse))) => {
@@ -997,7 +999,9 @@ fn handle_terminal_event_while_disconnected(
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_interaction();
-            app.handle_paste(text);
+            if !super::input::route_overlay_paste(app, &text) {
+                app.handle_paste(text);
+            }
             needs_redraw = true;
         }
         Some(Ok(Event::Mouse(mouse))) => {

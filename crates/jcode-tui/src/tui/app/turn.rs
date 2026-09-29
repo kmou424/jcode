@@ -211,7 +211,9 @@ impl App {
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
-                                self.handle_paste(text);
+                                if !super::input::route_overlay_paste(self, &text) {
+                                    self.handle_paste(text);
+                                }
                                 status_spinner_renderer.draw_full(self, terminal)?;
                                 super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                             }
@@ -533,7 +535,9 @@ impl App {
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
-                                self.handle_paste(text);
+                                if !super::input::route_overlay_paste(self, &text) {
+                                    self.handle_paste(text);
+                                }
                                 status_spinner_renderer.draw_full(self, terminal)?;
                             }
                             Some(Ok(Event::FocusGained)) => {
@@ -1506,7 +1510,9 @@ impl App {
                                     }
                                 }
                                 Some(Ok(Event::Paste(text))) => {
-                                    self.handle_paste(text);
+                                    if !super::input::route_overlay_paste(self, &text) {
+                                        self.handle_paste(text);
+                                    }
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                 }
                                 Some(Ok(Event::FocusGained)) => {
