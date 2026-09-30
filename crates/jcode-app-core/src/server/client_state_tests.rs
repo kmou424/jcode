@@ -57,6 +57,10 @@ impl Provider for MockProvider {
     fn reasoning_effort(&self) -> Option<String> {
         Some("high".to_string())
     }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec![self.model()]
+    }
 }
 
 #[tokio::test]
@@ -461,11 +465,16 @@ async fn assert_history_service_tier_and_pdf_capability(
             activity,
             service_tier,
             side_panel,
+            available_models,
             ..
         } => {
             assert_eq!(id, 42);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
+            // Busy-agent fallback must still carry the provider's catalog
+            // names: clients treat an empty model list as authoritative and
+            // wipe their `/model` picker state otherwise.
+            assert_eq!(available_models, vec!["mock-model".to_string()]);
             assert_eq!(
                 messages[0].content,
                 if busy {

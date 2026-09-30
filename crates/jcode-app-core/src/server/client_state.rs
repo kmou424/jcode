@@ -676,7 +676,11 @@ async fn send_history_from_persisted_session(
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
-        available_models: Vec::new(),
+        // The provider template is not agent state: filling the catalog names
+        // here keeps a busy-agent bootstrap from reporting an empty catalog.
+        // Clients treat a History with empty model fields as authoritative and
+        // would wipe their picker state otherwise.
+        available_models: provider.available_models_display(),
         available_model_routes: Vec::new(),
         mcp_servers: Vec::new(),
         skills,
