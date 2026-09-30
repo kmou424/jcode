@@ -723,6 +723,13 @@ impl App {
         // fallback routes for any newly appearing models. If the provider
         // identity changed, the old routes are stale and must be dropped.
         let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
+        // A snapshot carrying no catalog fields at all is not a catalog update:
+        // busy-agent History fallbacks and older servers emit exactly that, and
+        // adopting it would wipe every model name and route the client already
+        // knows, collapsing `/model` onto a single "catalog still loading" row
+        // until the next routed event. Provider meta above still applies.
+        let empty_catalog =
+            snapshot.available_models.is_empty() && snapshot.model_routes.is_empty();
         let replace_routes = !names_only || provider_name_changed;
         // Shared-server bus chatter rebroadcasts the catalog frequently (every
         // session's refresh fans out to every connected client). When nothing
@@ -730,7 +737,7 @@ impl App {
         // forces a picker-cache rebuild, an ~100KB cache rewrite to disk, and a
         // full-frame redraw on every idle client, which starves the input line.
         let catalog_changed = provider_meta_changed
-            || self.remote_available_entries != snapshot.available_models
+            || (!empty_catalog && self.remote_available_entries != snapshot.available_models)
             || (replace_routes && self.remote_model_options != snapshot.model_routes);
         if !catalog_changed {
             return CatalogReplaceOutcome {
@@ -738,8 +745,12 @@ impl App {
                 catalog_changed,
             };
         }
-        self.remote_available_entries = snapshot.available_models;
-        if replace_routes {
+        if !empty_catalog {
+            self.remote_available_entries = snapshot.available_models;
+        }
+        // A provider switch still clears the old provider's stale routes even
+        // when this snapshot carries no catalog data of its own.
+        if replace_routes && (!empty_catalog || provider_name_changed) {
             crate::provider_catalog::replace_remote_model_display_names(
                 snapshot.model_routes.iter().filter_map(|route| {
                     route

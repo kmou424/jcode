@@ -669,3 +669,169 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         recommended_routes
     );
 }
+
+fn remote_catalog_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {
+    crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        api_method: api_method.to_string(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    }
+}
+
+/// A `History` event shaped like the persisted-session fallback: provider
+/// identity present, catalog fields empty. The server emits exactly this
+/// while the agent is busy or still initializing its provider.
+fn empty_catalog_history_event(
+    provider_name: &str,
+    provider_model: &str,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::History {
+        id: 1,
+        session_id: "session-remote-catalog".to_string(),
+        messages: vec![],
+        images: vec![],
+        provider_name: Some(provider_name.to_string()),
+        provider_model: Some(provider_model.to_string()),
+        model_display_name: None,
+        model_context_window: None,
+        available_efforts: None,
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        applets: Default::default(),
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+    }
+}
+
+#[test]
+fn test_history_with_empty_catalog_fields_preserves_remote_models() {
+    // Busy-agent History fallbacks ship `available_models`/`available_model_routes`
+    // as empty vectors — "no catalog data", not "empty catalog". Applying one
+    // must not wipe the route catalog a previous push already installed.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_remote = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "gpt-6-astra".to_string(),
+            ],
+            available_model_routes: vec![
+                remote_catalog_route("claude-sonnet-4-20250514", "Anthropic", "claude-api"),
+                remote_catalog_route("gpt-6-astra", "Sub2API OpenAI", "openai-compatible:sub2api"),
+            ],
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_entries.len(), 2);
+    assert_eq!(app.remote_model_options.len(), 2);
+
+    // Same provider/model, empty catalog fields: exactly what the
+    // persisted-history fallback emits while the provider is still
+    // initializing (or the agent is mid-turn).
+    let history = empty_catalog_history_event("claude", "claude-sonnet-4-20250514");
+    app.handle_server_event(history, &mut remote);
+
+    assert_eq!(
+        app.remote_available_entries.len(),
+        2,
+        "a catalog-less History event must not wipe known remote model names"
+    );
+    assert_eq!(
+        app.remote_model_options.len(),
+        2,
+        "a catalog-less History event must not wipe known remote model routes"
+    );
+
+    // The picker must still list every previously known model afterwards.
+    app.open_model_picker();
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+    assert!(
+        picker
+            .entries
+            .iter()
+            .any(|entry| entry.name == "gpt-6-astra"),
+        "picker lost remote models after a catalog-less History event"
+    );
+}
+
+#[test]
+fn test_history_with_empty_catalog_and_provider_change_clears_routes() {
+    // Same empty-catalog shape, but the provider actually switched: keeping
+    // the old provider's routes would be stale, so they must be dropped.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_remote = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec!["claude-sonnet-4-20250514".to_string()],
+            available_model_routes: vec![remote_catalog_route(
+                "claude-sonnet-4-20250514",
+                "Anthropic",
+                "claude-api",
+            )],
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_model_options.len(), 1);
+
+    let history = empty_catalog_history_event("OpenAI", "gpt-6-astra");
+    app.handle_server_event(history, &mut remote);
+
+    assert!(
+        app.remote_model_options.is_empty(),
+        "provider switch with an empty catalog must drop the old provider's routes"
+    );
+    assert_eq!(app.remote_provider_name.as_deref(), Some("OpenAI"));
+    assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-6-astra"));
