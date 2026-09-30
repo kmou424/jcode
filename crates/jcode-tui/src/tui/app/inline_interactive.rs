@@ -100,6 +100,62 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 mod placeholder_routes;
 use placeholder_routes::route_supports_reasoning_effort;
 
+/// Channel-level availability filter for *authoritative* route lists (the
+/// local provider's own routes, or the remote daemon's `available_model_routes`
+/// push). `api_method` names one credential slot (OAuth vs API key vs named
+/// profile vs Copilot ...): a channel whose every route is `available = false`
+/// has no usable credential, so its rows — and any model reachable only
+/// through it — only ever render unselectable. Hide them so `/model` lists
+/// just the channels the user can actually switch to.
+///
+/// Callers must not run this on *synthesized* fallback routes (names-only
+/// remote catalogs): those guess availability from local auth state, which is
+/// meaningless under a remote daemon and would hide rows whose real
+/// credentials are healthy upstream.
+///
+/// The picker reuses previously built route lists, so a synthesized batch can
+/// reach this function anyway; `remote_model_routes_fallback` stamps every row
+/// it fabricates with the "fallback: static provider model list" detail, and a
+/// list where *every* route carries that stamp is skipped wholesale. Mixed
+/// lists still filter normally: the synthesized extras keep whatever
+/// availability their builder guessed, and pruning on that flag is
+/// self-consistent.
+///
+/// Exemptions: `current`/`remote-catalog` placeholder methods are picker
+/// scaffolding, not credentials; the current model keeps every route so its
+/// row never collapses mid-load; and when the whole catalog is dead the
+/// filter would empty the picker — strictly worse than showing dead rows — so
+/// it is skipped entirely.
+fn drop_unavailable_channel_routes(
+    routes: &mut Vec<crate::provider::ModelRoute>,
+    current_model: &str,
+) {
+    const SYNTHESIZED_FALLBACK_DETAIL: &str = "fallback: static provider model list";
+
+    if routes
+        .iter()
+        .all(|route| route.detail.contains(SYNTHESIZED_FALLBACK_DETAIL))
+    {
+        return;
+    }
+
+    // `api_method` is the channel id; owned `String`s so the set does not
+    // borrow `routes`, which `retain` mutates.
+    let live_methods: std::collections::HashSet<String> = routes
+        .iter()
+        .filter(|route| route.available)
+        .map(|route| route.api_method.clone())
+        .collect();
+    if live_methods.is_empty() {
+        return;
+    }
+    routes.retain(|route| {
+        live_methods.contains(&route.api_method)
+            || placeholder_routes::is_placeholder_route_method(&route.api_method)
+            || route.model == current_model
+    });
+}
+
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
 /// Each allowlist entry can name a provider label ("openai", "llama.cpp",
@@ -1321,7 +1377,8 @@ impl App {
 
         if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
             let routes_started = std::time::Instant::now();
-            let routes = self.simplified_model_routes_for_picker(&current_model);
+            let mut routes = self.simplified_model_routes_for_picker(&current_model);
+            drop_unavailable_channel_routes(&mut routes, &current_model);
             let routes_ms = routes_started.elapsed().as_millis();
             self.open_model_picker_with_routes(
                 cache_signature.clone(),
@@ -1345,6 +1402,10 @@ impl App {
             if !self.remote_model_options.is_empty() {
                 let mut routes = std::mem::take(&mut self.remote_model_options);
                 self.extend_remote_routes_for_uncovered_models(&mut routes);
+                // The daemon's `available_model_routes` push carries real
+                // per-route availability: hide dead channels here, before the
+                // picker groups them.
+                drop_unavailable_channel_routes(&mut routes, &current_model);
                 let routes_ms = routes_started.elapsed().as_millis();
                 self.remote_model_options = self.open_model_picker_with_routes(
                     cache_signature,
@@ -1406,7 +1467,9 @@ impl App {
                 return;
             }
         } else {
-            self.simplified_model_routes_for_picker(&current_model)
+            let mut routes = self.simplified_model_routes_for_picker(&current_model);
+            drop_unavailable_channel_routes(&mut routes, &current_model);
+            routes
         };
         let routes_ms = routes_started.elapsed().as_millis();
 
@@ -2205,14 +2268,19 @@ impl App {
             if took_remote_options {
                 let mut routes = std::mem::take(&mut self.remote_model_options);
                 self.extend_remote_routes_for_uncovered_models(&mut routes);
+                drop_unavailable_channel_routes(&mut routes, &current_model);
                 routes
             } else {
                 self.build_remote_model_routes_lightweight_fallback(&current_model)
             }
-        } else if crate::perf::tui_policy().simplified_model_picker {
-            self.simplified_model_routes_for_picker(&current_model)
         } else {
-            self.provider.model_routes()
+            let mut routes = if crate::perf::tui_policy().simplified_model_picker {
+                self.simplified_model_routes_for_picker(&current_model)
+            } else {
+                self.provider.model_routes()
+            };
+            drop_unavailable_channel_routes(&mut routes, &current_model);
+            routes
         };
         let routes_ms = routes_started.elapsed().as_millis();
         let raw_route_count = routes.len();

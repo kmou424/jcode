@@ -415,29 +415,39 @@ fn test_remote_catalog_activity_notification_upserts_compact_row() {
 
 #[test]
 fn test_model_picker_copilot_models_have_copilot_route() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
+    // Temp home: the synthesized fallback routes consult configured
+    // openai-compatible profiles from ambient config/env state, and hydrate
+    // from the persisted catalog cache, so a shared home lets stray routes
+    // suppress the copilot fallback this test asserts on.
+    with_temp_jcode_home(|| {
+        // A leaked `JCODE_NAMED_PROVIDER_PROFILE` marks every
+        // openai-compatible profile configured; drop it for the fallback.
+        let _profile_env = EnvRestoreGuard::capture(["JCODE_NAMED_PROVIDER_PROFILE"]);
+        crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
 
-    // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
-    // so it should get a copilot route
-    let grok_entry = picker
-        .entries
-        .iter()
-        .find(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
+        // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
+        // so it should get a copilot route
+        let grok_entry = picker
+            .entries
+            .iter()
+            .find(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
 
-    assert!(
-        grok_entry.options.iter().any(|r| r.api_method == "copilot"),
-        "grok-code-fast-1 should have a copilot route, got: {:?}",
-        grok_entry.options
-    );
+        assert!(
+            grok_entry.options.iter().any(|r| r.api_method == "copilot"),
+            "grok-code-fast-1 should have a copilot route, got: {:?}",
+            grok_entry.options
+        );
+    });
 }
 
 #[test]
@@ -922,4 +932,205 @@ fn test_remote_loading_picker_labels_remote_provider() {
     );
 
     app.clear_remote_startup_phase();
+}
+
+fn remote_catalog_route_with_availability(
+    model: &str,
+    provider: &str,
+    api_method: &str,
+    available: bool,
+) -> crate::provider::ModelRoute {
+    crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        api_method: api_method.to_string(),
+        available,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    }
+}
+
+fn picker_entry_names(app: &App) -> Vec<String> {
+    app.inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open")
+        .entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+#[test]
+fn test_model_picker_hides_models_reachable_only_through_dead_channels() {
+    // A channel (`api_method` = one credential slot) with zero available
+    // routes has no usable credential. Its routes — and the models reachable
+    // only through it — must not list in `/model`.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Anthropic".to_string());
+        app.remote_provider_model = Some("claude-opus-4-8".to_string());
+        app.remote_model_options = vec![
+            remote_catalog_route("claude-opus-4-8", "Anthropic", "claude-api"),
+            remote_catalog_route("gpt-6-astra", "Sub2API", "openai-compatible:sub2api"),
+            remote_catalog_route_with_availability(
+                "grok-code-fast-1",
+                "Copilot",
+                "copilot",
+                false,
+            ),
+        ];
+
+        app.open_model_picker();
+
+        let names = picker_entry_names(&app);
+        // Effort-capable routes expand to one row per effort level
+        // (`claude-opus-4-8 (high)`, ...), so match on the bare model prefix.
+        assert!(
+            names.iter().any(|name| name.starts_with("claude-opus-4-8")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.starts_with("gpt-6-astra")),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.starts_with("grok-code-fast-1")),
+            "model reachable only through the dead copilot channel must be hidden: {names:?}"
+        );
+    });
+}
+
+#[test]
+fn test_model_picker_strips_dead_channel_options_but_keeps_shared_model() {
+    // A model reachable through a live channel stays listed; only the dead
+    // channel's option rows disappear.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Anthropic".to_string());
+        // A different current model: `route.model == current_model` keeps every
+        // route for the current row, so the filter under test must apply to a
+        // non-current model.
+        app.remote_provider_model = Some("claude-sonnet-4".to_string());
+        app.remote_model_options = vec![
+            remote_catalog_route("claude-sonnet-4", "Anthropic", "claude-api"),
+            remote_catalog_route("claude-opus-4-8", "Anthropic", "claude-api"),
+            remote_catalog_route_with_availability(
+                "claude-opus-4-8",
+                "Anthropic",
+                "claude-oauth",
+                false,
+            ),
+        ];
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
+        let entries: Vec<_> = picker
+            .entries
+            .iter()
+            .filter(|entry| entry.name.starts_with("claude-opus-4-8"))
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "model with a live channel must stay listed"
+        );
+        for entry in &entries {
+            assert!(
+                entry
+                    .options
+                    .iter()
+                    .all(|option| option.api_method == "claude-api"),
+                "the dead claude-oauth channel must not appear under {:?}: {:?}",
+                entry.name,
+                entry.options
+            );
+        }
+    });
+}
+
+#[test]
+fn test_model_picker_keeps_current_model_when_its_channel_died() {
+    // The current model always keeps its row — hiding it would leave the
+    // picker unable to show where the session is.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Copilot".to_string());
+        app.remote_provider_model = Some("grok-code-fast-1".to_string());
+        app.remote_model_options = vec![
+            remote_catalog_route("claude-opus-4-8", "Anthropic", "claude-api"),
+            remote_catalog_route_with_availability(
+                "grok-code-fast-1",
+                "Copilot",
+                "copilot",
+                false,
+            ),
+        ];
+
+        app.open_model_picker();
+
+        let names = picker_entry_names(&app);
+        assert!(
+            names.iter().any(|name| name.starts_with("grok-code-fast-1")),
+            "current model must survive the dead-channel filter: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.starts_with("claude-opus-4-8")),
+            "{names:?}"
+        );
+    });
+}
+
+#[test]
+fn test_model_picker_fully_unavailable_catalog_stays_visible() {
+    // Every channel dead (e.g. nothing is logged in) must not collapse the
+    // picker to zero rows — showing the dead channels beats showing nothing.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Anthropic".to_string());
+        app.remote_provider_model = Some("claude-opus-4-8".to_string());
+        app.remote_model_options = vec![
+            remote_catalog_route_with_availability(
+                "claude-opus-4-8",
+                "Anthropic",
+                "claude-api",
+                false,
+            ),
+            remote_catalog_route_with_availability(
+                "grok-code-fast-1",
+                "Copilot",
+                "copilot",
+                false,
+            ),
+        ];
+
+        app.open_model_picker();
+
+        let names = picker_entry_names(&app);
+        assert!(
+            names.len() >= 2,
+            "fully-dead catalog must still list its rows: {names:?}"
+        );
+    });
 }
