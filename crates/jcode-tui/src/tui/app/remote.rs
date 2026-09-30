@@ -221,6 +221,15 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             crate::logging::warn(&format!("Failed to load remote skills: {}", err));
         }
     }
+    // `/model` opened while the remote route catalog was empty: send the
+    // queued `GetModelCatalog` request. The reply lands as a model-catalog
+    // sideband payload and refreshes the open picker in place.
+    if app.pending_remote_model_catalog_request {
+        app.pending_remote_model_catalog_request = false;
+        if let Err(err) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!("Failed to request remote model catalog: {}", err));
+        }
+    }
     // Remote-primary config writes: `Config::save`/`create_default_config_file`
     // under the remote override queue their TOML instead of touching the
     // local file; forward each payload as a `write_config` request.

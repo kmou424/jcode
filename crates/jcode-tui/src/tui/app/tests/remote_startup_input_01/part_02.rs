@@ -835,3 +835,91 @@ fn test_history_with_empty_catalog_and_provider_change_clears_routes() {
     );
     assert_eq!(app.remote_provider_name.as_deref(), Some("OpenAI"));
     assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-6-astra"));
+}
+
+#[test]
+fn test_remote_model_picker_with_no_routes_requests_catalog() {
+    // Names may be known (live pushes arrive names-only past the size cap, or
+    // the cache was never persisted) while the route catalog stays empty. The
+    // picker must queue a one-shot `GetModelCatalog` — drained by the remote
+    // poll loop — instead of permanently rendering placeholder routes.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Sub2API OpenAI".to_string());
+        app.remote_provider_model = Some("swe-2".to_string());
+        app.remote_available_entries = vec!["swe-2".to_string(), "gpt-6-astra".to_string()];
+        app.remote_model_options = Vec::new();
+
+        app.open_model_picker();
+
+        assert!(
+            app.pending_remote_model_catalog_request,
+            "route-less remote picker must queue a catalog request"
+        );
+    });
+}
+
+#[test]
+fn test_remote_model_picker_with_routes_does_not_request_catalog() {
+    // When real routes are already known the picker must not burn a
+    // `GetModelCatalog` round-trip.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Sub2API OpenAI".to_string());
+        app.remote_provider_model = Some("swe-2".to_string());
+        app.remote_available_entries = vec!["swe-2".to_string()];
+        app.remote_model_options = vec![remote_catalog_route(
+            "swe-2",
+            "Sub2API OpenAI",
+            "openai-compatible:sub2api",
+        )];
+
+        app.open_model_picker();
+
+        assert!(
+            !app.pending_remote_model_catalog_request,
+            "picker with real routes must not request the catalog again"
+        );
+    });
+}
+
+#[test]
+fn test_remote_loading_picker_labels_remote_provider() {
+    // While the startup catalog is still in flight the picker renders a
+    // single loading row. That row must name the remote provider, not the
+    // local provider (which is a different, unrelated identity over SSH).
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    app.is_remote = true;
+    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+    app.remote_provider_name = Some("Sub2API OpenAI".to_string());
+    app.remote_provider_model = Some("swe-2".to_string());
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("loading picker should be open");
+    assert_eq!(picker.entries.len(), 1);
+    assert_eq!(
+        picker.entries[0].options[0].provider, "Sub2API OpenAI",
+        "loading row must carry the remote provider label"
+    );
+
+    app.clear_remote_startup_phase();
+}

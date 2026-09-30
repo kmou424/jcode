@@ -1257,6 +1257,14 @@ impl App {
             && self.remote_model_options.is_empty()
         {
             self.hydrate_remote_model_catalog_cache();
+            // Hydration failing leaves every row below synthesized from
+            // names-only data (no persisted cache, or an SSH remote which
+            // never hydrates). Queue a `GetModelCatalog` request — drained
+            // by the remote poll loop — whose reply reopens this picker in
+            // place once real routes land.
+            if self.remote_model_options.is_empty() {
+                self.pending_remote_model_catalog_request = true;
+            }
         }
 
         let current_model = if self.is_remote {
@@ -1425,7 +1433,11 @@ impl App {
             entries: vec![PickerEntry {
                 name: model_label,
                 options: vec![PickerOption {
-                    provider: self.provider.name().to_string(),
+                    provider: self
+                        .remote_provider_name
+                        .clone()
+                        .filter(|_| self.is_remote)
+                        .unwrap_or_else(|| self.provider.name().to_string()),
                     api_method: "current".to_string(),
                     available: true,
                     detail: "updating model list…".to_string(),

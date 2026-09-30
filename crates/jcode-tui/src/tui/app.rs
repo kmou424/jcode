@@ -1757,6 +1757,11 @@ pub struct App {
     /// items (drained on the remote poll loop; the reply arrives as a
     /// `get_todos` sideband reply and renders the card).
     pending_remote_todos_request: bool,
+    /// `/model` opened while the remote route catalog is empty (persisted
+    /// cache missing/unreadable, or an SSH remote which never hydrates):
+    /// the remote poll loop owes the daemon one `GetModelCatalog` request;
+    /// the reply refreshes the open picker in place.
+    pending_remote_model_catalog_request: bool,
     /// `/open` directory browser overlay (None = not visible).
     dir_browser_overlay: Option<RefCell<super::dir_browser::DirBrowser>>,
     /// Local mode: in-flight listing for the directory browser.
