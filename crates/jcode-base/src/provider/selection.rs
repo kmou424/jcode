@@ -483,6 +483,9 @@ impl MultiProvider {
                 ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
                 | ModelRouteApiMethod::CodeAssistOAuth
                 | ModelRouteApiMethod::RemoteCatalog
+                // The ChatGPT-web transport dispatches on the model id
+                // (`gpt-5.6-pro[web]`), not on a route prefix.
+                | ModelRouteApiMethod::ChatGptWeb
                 | ModelRouteApiMethod::Current
                 | ModelRouteApiMethod::Other(_) => {}
             }

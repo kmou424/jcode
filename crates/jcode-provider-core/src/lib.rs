@@ -770,6 +770,14 @@ impl RuntimeKey {
             ModelRouteApiMethod::AntigravityHttps => Self::Antigravity,
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
             ModelRouteApiMethod::Current => Self::Current,
+            // The ChatGPT-web transport dispatches on the model id itself
+            // (`gpt-5.6-pro[web]`), not on a dedicated runtime slot. Keep the
+            // `Other{method}` shape so `stable_id`, the serde wire form, and
+            // `routed_model_spec` stay byte-identical to the pre-`ChatGptWeb`
+            // behaviour (which also reached `Other` via `parse`).
+            ModelRouteApiMethod::ChatGptWeb => Self::Other {
+                method: "chatgpt-web".to_string(),
+            },
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
@@ -919,6 +927,7 @@ pub enum ModelRouteApiMethod {
     AntigravityHttps,
     RemoteCatalog,
     Current,
+    ChatGptWeb,
     GrokBuild,
     Other(String),
 }
@@ -956,6 +965,7 @@ impl ModelRouteApiMethod {
             "https" => Self::AntigravityHttps,
             "remote-catalog" => Self::RemoteCatalog,
             "current" => Self::Current,
+            "chatgpt-web" => Self::ChatGptWeb,
             _ => {
                 if let Some(("openai-compatible", profile_id)) = lower.split_once(':') {
                     let profile_id = profile_id.trim();
@@ -1025,6 +1035,7 @@ impl ModelRouteApiMethod {
             Self::AntigravityHttps => "https".to_string(),
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
+            Self::ChatGptWeb => "chatgpt-web".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
             Self::Other(method) => method
                 .split_once(':')
@@ -1469,6 +1480,14 @@ mod tests {
         assert_eq!(
             ModelRouteApiMethod::parse("grok-build"),
             ModelRouteApiMethod::GrokBuild
+        );
+        // `chatgpt-web` is emitted by the route builders for OAuth'd ChatGPT
+        // sessions. Without a parse arm it collapsed to `Other`, which the
+        // TUI's remote catalog safety check rejects — refusing to persist
+        // any remote catalog containing a chatgpt-web route.
+        assert_eq!(
+            ModelRouteApiMethod::parse("chatgpt-web"),
+            ModelRouteApiMethod::ChatGptWeb
         );
     }
 

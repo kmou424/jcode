@@ -51,6 +51,9 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::CodeAssistOAuth
         | Method::AntigravityHttps
         | Method::RemoteCatalog
+        // ChatGPT-web rides the fixed browser session; a per-request effort
+        // cannot be applied there, matching the previous `Other` handling.
+        | Method::ChatGptWeb
         | Method::Current
         | Method::Other(_) => false,
     }
