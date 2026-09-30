@@ -466,7 +466,11 @@ fn smoke_test_server_request(
     stream.get_mut().write_all(payload.as_bytes())?;
     stream.get_mut().flush()?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // The server may spend well over 5s answering the first ping on a
+    // populated JCODE_HOME (session-search warmup, provider catalog init),
+    // so give the handshake enough headroom before declaring the smoke test
+    // failed.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut line = String::new();
         let bytes = stream.read_line(&mut line)?;
@@ -504,8 +508,8 @@ fn smoke_test_server_connect(
     path: &Path,
 ) -> std::io::Result<BufReader<std::os::unix::net::UnixStream>> {
     let stream = std::os::unix::net::UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     Ok(BufReader::new(stream))
 }
 
