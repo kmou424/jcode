@@ -1072,6 +1072,10 @@ impl BashTool {
         if let Some(ref dir) = ctx.working_dir {
             command.current_dir(dir);
         }
+        // Expose the session id to the spawned process so plugins and hooks
+        // invoked from the shell can key per-session state (mode flags,
+        // per-session caches) without leaking into other sessions.
+        command.env("JCODE_SESSION_ID", &ctx.session_id);
         let mut child = command.spawn()?;
 
         let child_pid = child.id().unwrap_or(0);

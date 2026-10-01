@@ -10,6 +10,9 @@ impl Agent {
     /// the provider is responsible for discarding an incompatible warmup.
     pub(crate) async fn prewarm_provider_idle(&self) {
         let tools = self.tool_definitions_for_debug().await;
+        // Prewarm only uses `static_part`, so skip the per-turn overlay hook —
+        // the hook may consult mode state that changes between turns and would
+        // just burn a process spawn for a result we discard.
         let split_prompt = self.build_system_prompt_split(None);
         self.provider
             .prewarm(&tools, &split_prompt.static_part)
@@ -91,7 +94,7 @@ impl Agent {
             // compacting the request history. This is the first point where the
             // stable request settings are available.
             let mut tools = self.tool_definitions().await;
-            let mut split_prompt = self.build_system_prompt_split(None);
+            let mut split_prompt = self.build_system_prompt_split_with_overlay(None).await;
             self.provider
                 .prewarm(&tools, &split_prompt.static_part)
                 .await;
@@ -115,7 +118,7 @@ impl Agent {
                 // Compaction clears the tool lock, so rebuild the foreground
                 // request metadata rather than relying on the pre-compaction snapshot.
                 tools = self.tool_definitions().await;
-                split_prompt = self.build_system_prompt_split(None);
+                split_prompt = self.build_system_prompt_split_with_overlay(None).await;
             }
 
             let messages: std::sync::Arc<[Message]> = messages.into();

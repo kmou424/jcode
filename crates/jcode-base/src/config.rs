@@ -11,8 +11,8 @@ pub use jcode_config_types::{
     MarkdownSpacingMode, MemoryConfig, MemorySyncConfig, NamedProviderAuth, NamedProviderConfig,
     NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
     PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
-    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    SlashCommandEntry, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig,
+    UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -605,6 +605,15 @@ pub struct Config {
 
     /// Lifecycle hooks (external commands at turn/session/tool boundaries)
     pub hooks: HooksConfig,
+
+    /// User-registered slash commands: external commands bound to `/name`.
+    /// Resolved before skill invocation and before built-in commands only
+    /// when the built-in doesn't already claim the name — the table lets
+    /// plugins provide their own slash surface (mode switches, status
+    /// queries) without forking jcode. Each entry's `command` may itself
+    /// handle `__complete` for argument completion.
+    #[serde(default)]
+    pub slash_commands: std::collections::BTreeMap<String, SlashCommandEntry>,
 
     /// Ambient mode configuration
     pub ambient: AmbientConfig,

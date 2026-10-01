@@ -968,9 +968,21 @@ pub struct HooksConfig {
     /// Fields: TOOL_NAME, STATUS ("ok"/"error"), DURATION_MS, OUTPUT_BYTES.
     /// Env override: JCODE_HOOK_POST_TOOL.
     pub post_tool: Option<HookCommands>,
+    /// Runs before each turn's system prompt is assembled. Stdout (up to 16KB)
+    /// is appended as a "# Prompt Overlay" block in the dynamic part of the
+    /// prompt — sessions that want per-turn or per-mode prompt content
+    /// (e.g. ponytail-style mode plugins) write their text here. Fields:
+    /// TURN ("1" on first turn, increments after).
+    /// Env override: JCODE_HOOK_PROMPT_OVERLAY.
+    pub prompt_overlay: Option<HookCommands>,
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Max milliseconds to wait for each `prompt_overlay` hook before failing
+    /// open with no overlay (default: 500). Kept tight because this hook runs
+    /// on every turn; slow hooks add latency to every request.
+    /// Env override: JCODE_HOOK_PROMPT_OVERLAY_TIMEOUT_MS.
+    pub prompt_overlay_timeout_ms: u64,
 }
 
 impl Default for HooksConfig {
@@ -984,7 +996,47 @@ impl Default for HooksConfig {
             session_end: None,
             pre_tool: None,
             post_tool: None,
+            prompt_overlay: None,
             pre_tool_timeout_ms: 5000,
+            prompt_overlay_timeout_ms: 500,
+        }
+    }
+}
+
+/// An external command bound to a `/name` slash command.
+///
+/// Dispatched before skill resolution when the user types `/name ...`. The
+/// command runs as a subprocess and returns a JSON action on stdout
+/// describing what jcode should do (display text, activate a skill, etc).
+///
+/// For argument completion, the same command is invoked as
+/// `command __completions <arg1> <arg2> ... <prefix>` and must print a JSON
+/// object `{"candidates":[{"value":"..","description":".."}, ...]}` on
+/// stdout. Any non-JSON output or non-zero exit means "no completions".
+///
+/// Example:
+///
+/// ```toml
+/// [slash_commands.ponytail-ctl]
+/// command = "bash ~/.jcode/scripts/ponytail-ctl.sh"
+/// description = "Lazy senior dev mode"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SlashCommandEntry {
+    /// Shell command to invoke. Parsed shell-style (no shell is used);
+    /// `~` expands to the home directory.
+    pub command: String,
+    /// Short blurb shown next to `/name` in the slash-command picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl Default for SlashCommandEntry {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            description: None,
         }
     }
 }

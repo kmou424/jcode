@@ -8,7 +8,7 @@
 //! working locally. Both call sites now share this list, so adding a handler
 //! here makes it reachable from every in-process entry point at once.
 
-use super::App;
+use super::{App, DisplayMessage};
 
 /// Local-only operations must not interpret the remote session's paths or IDs
 /// against the laptop. Wire-backed commands are handled before local dispatch.
@@ -272,6 +272,75 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)
         || super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+        || handle_external_slash_command(app, trimmed)
+}
+
+/// Dispatch `[slash_commands]`-registered external commands (`/name args…`).
+/// Runs last in the chain so built-ins always win their own names; the
+/// dispatching into a subprocess is what lets plugins own arbitrary slash
+/// surfaces without touching jcode source.
+fn handle_external_slash_command(app: &mut App, trimmed: &str) -> bool {
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+    let mut parts = trimmed.split_whitespace();
+    let Some(raw_name) = parts.next() else {
+        return false;
+    };
+    let name = raw_name.trim_start_matches('/');
+    if !jcode_base::slash_commands::is_external_command(name) {
+        return false;
+    }
+
+    let args: Vec<String> = parts.map(str::to_owned).collect();
+    let session_id = app.session.id.clone();
+    let cwd = app.session.working_dir.clone();
+
+    match jcode_base::slash_commands::run_command(name, &args, &session_id, cwd.as_deref()) {
+        None => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "/{name}: external command failed to run"
+            )));
+            true
+        }
+        Some(jcode_base::slash_commands::SlashCommandAction::Silent) => true,
+        Some(jcode_base::slash_commands::SlashCommandAction::Display { text }) => {
+            app.push_display_message(DisplayMessage::system(text));
+            true
+        }
+        Some(jcode_base::slash_commands::SlashCommandAction::Error { text }) => {
+            app.push_display_message(DisplayMessage::error(text));
+            true
+        }
+        Some(jcode_base::slash_commands::SlashCommandAction::ActivateSkill { skill, prompt }) => {
+            activate_skill_from_slash(app, &skill, prompt);
+            true
+        }
+        Some(jcode_base::slash_commands::SlashCommandAction::DisplayAndActivate {
+            text,
+            skill,
+            prompt,
+        }) => {
+            app.push_display_message(DisplayMessage::system(text));
+            activate_skill_from_slash(app, &skill, prompt);
+            true
+        }
+    }
+}
+
+/// Mark `skill` as the active skill and, when `prompt` is provided, inject it
+/// into the input line as the user prompt for this turn. Mirrors what the
+/// `/skillname` path in `input.rs` does — `active_skill` is read by the
+/// prompt builder on the next turn.
+fn activate_skill_from_slash(app: &mut App, skill: &str, prompt: Option<String>) {
+    app.active_skill = Some(skill.to_string());
+    app.push_display_message(DisplayMessage::system(format!("Activated skill: {skill}")));
+    if let Some(prompt) = prompt
+        && !prompt.is_empty()
+    {
+        app.input = prompt;
+        app.cursor_pos = app.input.len();
+    }
 }
 
 /// Environment-mode tests run in their own process, so parallel local-mode

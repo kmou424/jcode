@@ -120,6 +120,41 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        self.build_system_prompt_split_sync(memory_prompt)
+    }
+
+    /// Async variant that additionally runs `prompt_overlay` hooks and
+    /// appends their stdout to `split.dynamic_part` under a "# Prompt Overlay"
+    /// heading. Callers in async context should prefer this over
+    /// [`Self::build_system_prompt_split`] so plugins get their per-turn
+    /// overlay slot.
+    pub(super) async fn build_system_prompt_split_with_overlay(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
+        let mut split = self.build_system_prompt_split_sync(memory_prompt);
+
+        if let Some(overlay) = crate::hooks::run_prompt_overlay_hooks(
+            &self.session.id,
+            self.session.working_dir.as_deref(),
+            self.session.messages.len() as u32,
+        )
+        .await
+        {
+            if !split.dynamic_part.is_empty() {
+                split.dynamic_part.push_str("\n\n");
+            }
+            split.dynamic_part.push_str("# Prompt Overlay\n\n");
+            split.dynamic_part.push_str(&overlay);
+        }
+
+        split
+    }
+
+    fn build_system_prompt_split_sync(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
             return crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),

@@ -396,6 +396,18 @@ impl App {
         let skills = self.current_skills_snapshot();
         push_skill_commands(&mut commands, &mut seen, &skills);
 
+        // `[slash_commands]`-registered externals. Populating these eagerly is
+        // safe because `spec_for()` itself only hits `--describe` lazily once
+        // completion actually requests a command's subcommands.
+        for (name, _entry) in jcode_base::slash_commands::external_command_names() {
+            let command = format!("/{name}");
+            if seen.insert(command.clone()) {
+                let help = jcode_base::slash_commands::external_command_description(&name)
+                    .unwrap_or_else(|| "External command".to_string());
+                commands.push((command, help));
+            }
+        }
+
         if self.is_remote && !self.remote_skills.is_empty() {
             for skill in &self.remote_skills {
                 let command = format!("/{skill}");
@@ -1277,6 +1289,39 @@ impl App {
 
             let suggestions = (1..=visible_count)
                 .map(|n| (format!("/rewind {}", n), "Rewind to this message"))
+                .collect();
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        // `[slash_commands]` arg completion: if the input resolves to a
+        // registered external command with args already typed, delegate to
+        // its `--describe` schema (or `__completions` fallback). Runs after
+        // every built-in pattern so built-ins still own their own names.
+        if let Some((cmd, args, prefix)) = jcode_base::slash_commands::parse_input(input)
+            && jcode_base::slash_commands::is_external_command(&cmd)
+            // Trigger arg completion once a space separates the name from the
+            // args (or a trailing space opens a fresh arg).
+            && input.trim_start_matches(&format!("/{cmd}")).starts_with(' ')
+        {
+            let session_id = self.session.id.as_str();
+            let cwd = self.session.working_dir.as_deref();
+            let candidates =
+                jcode_base::slash_commands::completions_for(&cmd, &args, &prefix, session_id, cwd);
+            // Rebuild the full command line — `completed` args are already
+            // committed, so a candidate for the in-flight token is appended.
+            let completed_prefix = if args.is_empty() {
+                format!("/{cmd}")
+            } else {
+                format!("/{cmd} {}", args.join(" "))
+            };
+            let suggestions: Vec<(String, String)> = candidates
+                .into_iter()
+                .map(|c| {
+                    (
+                        format!("{completed_prefix} {}", c.value),
+                        c.description.unwrap_or_default(),
+                    )
+                })
                 .collect();
             return self.rank_suggestions(input, suggestions);
         }

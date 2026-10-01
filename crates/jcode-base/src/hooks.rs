@@ -127,6 +127,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "session_end" => hooks.session_end.as_ref(),
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
+        "prompt_overlay" => hooks.prompt_overlay.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -319,6 +320,18 @@ fn build_hook_process(
         .split_first()
         .expect("parse_hook_command guarantees at least one part");
     let mut cmd = std::process::Command::new(expand_home(program));
+    // `Command::new().args()` bypasses the shell — `~/` inside an argument
+    // would otherwise stay literal. Expand the same way `expand_home` does
+    // for the program.
+    let args: Vec<String> = args
+        .iter()
+        .map(|a| {
+            expand_home(a)
+                .to_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| a.clone())
+        })
+        .collect();
     cmd.args(args);
     if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty())
         && std::path::Path::new(cwd).is_dir()
@@ -501,6 +514,129 @@ async fn run_pre_tool_command(
             ));
             GateDecision::Allow
         }
+    }
+}
+
+/// Maximum bytes of stdout collected from `prompt_overlay` hooks.
+/// Generous on purpose: the output lands in the system prompt where the model
+/// reads it verbatim, so a hostile or runaway hook could otherwise stuff the
+/// context window.
+const PROMPT_OVERLAY_STDOUT_LIMIT: usize = 16 * 1024;
+
+/// Run each configured `prompt_overlay` hook and concatenate their stdout.
+///
+/// Called once per turn while the system prompt is being assembled. The
+/// returned string is appended to the dynamic (uncached) section of the
+/// prompt under a "# Prompt Overlay" heading; an empty result means "no
+/// overlay this turn". Hooks are observers here — failures, timeouts, and
+/// non-zero exits are logged and contribute nothing; the hook can never
+/// block prompt assembly.
+///
+/// Environment provided to each hook:
+///   JCODE_HOOK_EVENT        = "prompt_overlay"
+///   JCODE_HOOK_SESSION_ID   = the session id
+///   JCODE_HOOK_CWD          = the session working directory
+///   JCODE_HOOK_TURN         = 1-based turn counter for this session
+///   JCODE_HOOK_PAYLOAD      = JSON mirror of the above
+///
+/// stdout is trimmed of leading/trailing whitespace; empty after trim is
+/// treated as no overlay.
+pub async fn run_prompt_overlay_hooks(
+    session_id: &str,
+    working_dir: Option<&str>,
+    turn_index: u32,
+) -> Option<String> {
+    let command_lines = hook_commands("prompt_overlay");
+    if command_lines.is_empty() {
+        return None;
+    }
+
+    let mut event = HookEvent::new("prompt_overlay")
+        .session_id(session_id)
+        .field("TURN", turn_index.to_string());
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
+    }
+
+    let timeout_ms = crate::config::config()
+        .hooks
+        .prompt_overlay_timeout_ms
+        .max(1);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+
+    let mut collected = String::new();
+    for command_line in command_lines {
+        let std_cmd = match build_hook_process(&command_line, &event) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Hook 'prompt_overlay' command '{command_line}' is invalid: {error}"
+                ));
+                continue;
+            }
+        };
+
+        let mut cmd = tokio::process::Command::from(std_cmd);
+        // No stdin: overlay hooks are pure producers. Closing stdin immediately
+        // lets the hook skip any stdin read on its side.
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Hook 'prompt_overlay' command '{command_line}' failed to start: {error}"
+                ));
+                continue;
+            }
+        };
+
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                crate::logging::warn(&format!(
+                    "Hook 'prompt_overlay' command '{command_line}' failed: {error}"
+                ));
+                continue;
+            }
+            Err(_elapsed) => {
+                crate::logging::warn(&format!(
+                    "Hook 'prompt_overlay' command '{command_line}' timed out after {}ms",
+                    timeout.as_millis()
+                ));
+                continue;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr_lossy = String::from_utf8_lossy(&output.stderr);
+            let stderr_tail = truncate_bytes(&stderr_lossy, BLOCK_REASON_LIMIT);
+            crate::logging::warn(&format!(
+                "Hook 'prompt_overlay' command '{command_line}' exited with {:?}: {}",
+                output.status.code(),
+                stderr_tail.trim()
+            ));
+            continue;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !collected.is_empty() {
+            collected.push_str("\n\n");
+        }
+        collected.push_str(truncate_bytes(trimmed, PROMPT_OVERLAY_STDOUT_LIMIT));
+    }
+
+    if collected.is_empty() {
+        None
+    } else {
+        Some(collected)
     }
 }
 
