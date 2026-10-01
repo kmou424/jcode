@@ -211,6 +211,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
     crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-api-key");
     MultiProvider {
         anthropic: RwLock::new(None),
+        anthropic_profile_binding: RwLock::new(None),
         openai: RwLock::new(Some(test_openai_runtime() as Arc<dyn Provider>)),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(None),
@@ -1014,6 +1015,7 @@ fn test_openrouter_runtime() -> anyhow::Result<Arc<dyn Provider>> {
 fn test_multi_provider_with_cursor() -> MultiProvider {
     MultiProvider {
         anthropic: RwLock::new(None),
+        anthropic_profile_binding: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(None),

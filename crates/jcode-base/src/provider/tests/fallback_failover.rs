@@ -174,6 +174,7 @@ fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credent
         let _enter = runtime.enter();
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -290,6 +291,7 @@ fn test_should_not_failover_on_generic_error() {
 fn test_no_provider_error_mentions_tokens_and_details() {
     let provider = MultiProvider {
         anthropic: RwLock::new(None),
+        anthropic_profile_binding: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(None),
@@ -328,6 +330,7 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
             crate::env::remove_var("OPENROUTER_API_KEY");
             let provider = MultiProvider {
                 anthropic: RwLock::new(None),
+                anthropic_profile_binding: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
                 antigravity: RwLock::new(None),

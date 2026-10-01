@@ -69,6 +69,12 @@ impl MultiProvider {
                     anthropic
                         .complete(messages, tools, system, resume_session_id)
                         .await
+                } else if let Some(profile) = self.bound_anthropic_profile_name() {
+                    Err(anyhow::anyhow!(
+                        "Provider profile '{}' is selected but its anthropic-compatible runtime failed to initialize. Check the profile's base_url and credential in [providers.{}].",
+                        profile,
+                        profile
+                    ))
                 } else {
                     Err(anyhow::anyhow!(
                         "Claude credentials not available. Run `jcode login --provider claude` to log in."
@@ -194,6 +200,12 @@ impl MultiProvider {
                             resume_session_id,
                         )
                         .await
+                } else if let Some(profile) = self.bound_anthropic_profile_name() {
+                    Err(anyhow::anyhow!(
+                        "Provider profile '{}' is selected but its anthropic-compatible runtime failed to initialize. Check the profile's base_url and credential in [providers.{}].",
+                        profile,
+                        profile
+                    ))
                 } else {
                     Err(anyhow::anyhow!(
                         "Claude credentials not available. Run `jcode login --provider claude` to log in."

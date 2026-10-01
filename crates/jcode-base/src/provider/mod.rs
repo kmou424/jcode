@@ -372,6 +372,12 @@ pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
 pub struct MultiProvider {
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: RwLock<Option<Arc<dyn Provider>>>,
+    /// When the `anthropic` slot is bound to a named `[providers.<name>]`
+    /// anthropic-compatible profile, this records `(profile_name, config)` so
+    /// `fork` can rebuild the exact channel (URL, credential, headers, auth,
+    /// models) via [`external::AnthropicRuntimeSpec::NamedProfile`] instead of
+    /// falling back to the built-in Claude/Anthropic env-derived runtime.
+    anthropic_profile_binding: RwLock<Option<(String, crate::config::NamedProviderConfig)>>,
     openai: RwLock<Option<Arc<dyn Provider>>>,
     /// GitHub Copilot API provider (direct API, hot-swappable after login).
     /// Held as `dyn Provider`: the concrete runtime lives downstream in
@@ -1017,16 +1023,29 @@ impl MultiProvider {
             config.provider_type,
             crate::config::NamedProviderType::AnthropicCompatible
         ) {
-            crate::provider_catalog::apply_named_provider_profile_env(profile_name)?;
-            let provider =
-                external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
-                    .ok_or_else(|| anyhow::anyhow!("Anthropic runtime is not registered"))?;
-            crate::provider_catalog::clear_anthropic_profile_env();
+            // A named anthropic-compatible profile is a true custom channel:
+            // the provider is built straight from the profile config and never
+            // round-trips through the `JCODE_ANTHROPIC_*` process env.
+            let provider = external::instantiate_anthropic_runtime(
+                external::AnthropicRuntimeSpec::NamedProfile {
+                    name: profile_name.to_string(),
+                    config: config.clone(),
+                },
+            )?;
+            // `JCODE_NAMED_PROVIDER_PROFILE` is the shared marker other surfaces
+            // (model display names, startup profile detection) read to know a
+            // named profile is active; it is not a credential/URL channel.
+            crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", profile_name);
             provider.set_model(model)?;
             *self
                 .anthropic
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+            *self
+                .anthropic_profile_binding
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((profile_name.to_string(), config));
             self.clear_active_openai_compatible_profile();
             self.set_active_provider(ActiveProvider::Claude);
             return Ok(());
@@ -1136,6 +1155,10 @@ impl MultiProvider {
                     crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
                     crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
                     crate::provider_catalog::clear_anthropic_profile_env();
+                    *self
+                        .anthropic_profile_binding
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                     crate::env::set_var(
                         "JCODE_RUNTIME_PROVIDER",
                         match anthropic_credential_mode {
@@ -1163,6 +1186,12 @@ impl MultiProvider {
                         anthropic.set_credential_mode(mode)?;
                     }
                     anthropic.set_model(&model)?;
+                } else if let Some(profile) = self.bound_anthropic_profile_name() {
+                    anyhow::bail!(
+                        "Provider profile '{}' is selected but its anthropic-compatible runtime failed to initialize. Check the profile's base_url and credential in [providers.{}].",
+                        profile,
+                        profile
+                    );
                 } else {
                     anyhow::bail!(
                         "Claude credentials not available. Run `jcode login --provider claude` first."
@@ -1689,6 +1718,16 @@ impl MultiProvider {
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
         let prefix = match active {
             ActiveProvider::Claude => {
+                // A bound named profile must round-trip through
+                // `<profile>:<model>` so the fork re-binds the profile channel
+                // instead of the built-in Claude provider.
+                if let Some((profile_name, _)) = &*self
+                    .anthropic_profile_binding
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                {
+                    return format!("{profile_name}:{current_model}");
+                }
                 if let Some(anthropic) = self.anthropic_provider() {
                     // OAuth/ApiKey emit their canonical model prefix; Auto keeps
                     // the bare provider key (route without pinning a credential).
@@ -1817,6 +1856,22 @@ impl Provider for MultiProvider {
     }
 
     fn display_name(&self) -> String {
+        // A bound anthropic-compatible profile channel surfaces the profile's
+        // `display_name` (or config key), never "Claude".
+        if matches!(self.active_provider(), ActiveProvider::Claude)
+            && let Some((profile_name, config)) = &*self
+                .anthropic_profile_binding
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            return config
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| profile_name.clone());
+        }
         // The OpenRouter slot multiplexes the public aggregator and every
         // direct OpenAI-compatible profile (NVIDIA NIM, DeepSeek, ...). Ask the
         // active execution runtime for its own label so the UI reflects the
@@ -2819,7 +2874,28 @@ impl Provider for MultiProvider {
         let current_model = self.model();
         let active = self.active_provider();
 
-        let anthropic = if self.anthropic_provider().is_some() {
+        // A slot bound to a named anthropic-compatible profile rebuilds from
+        // the recorded (name, config) pair: the child channel keeps the
+        // profile's own URL/credential/headers and never falls back to the
+        // built-in Claude/Anthropic env-derived runtime.
+        let profile_binding_for_fork = self
+            .anthropic_profile_binding
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let anthropic = if let Some((name, config)) = profile_binding_for_fork.clone() {
+            external::instantiate_anthropic_runtime(external::AnthropicRuntimeSpec::NamedProfile {
+                name,
+                config,
+            })
+            .map_err(|err| {
+                crate::logging::warn(&format!(
+                    "Failed to fork named anthropic profile runtime: {err:#}"
+                ));
+                err
+            })
+            .ok()
+        } else if self.anthropic_provider().is_some() {
             external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
@@ -2872,6 +2948,7 @@ impl Provider for MultiProvider {
 
         let provider = Self {
             anthropic: RwLock::new(anthropic),
+            anthropic_profile_binding: RwLock::new(profile_binding_for_fork),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
             antigravity: RwLock::new(antigravity_provider),

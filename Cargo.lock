@@ -3642,6 +3642,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-anthropic",
  "jcode-provider-core",
+ "jcode-provider-env",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

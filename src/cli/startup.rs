@@ -226,6 +226,25 @@ pub fn register_external_provider_runtimes() {
         crate::provider::external::ANTHROPIC_RUNTIME,
         || std::sync::Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new()),
     );
+    // The Anthropic transport also serves named `[providers.<name>]`
+    // anthropic-compatible profiles as fully isolated custom channels; register
+    // the parameterized factory so `instantiate_anthropic_runtime` can build a
+    // profile-bound provider without round-tripping process env vars.
+    crate::provider::external::register_anthropic_factory(|spec| {
+        use crate::provider::external::AnthropicRuntimeSpec;
+        use jcode_provider_anthropic_runtime::AnthropicProvider;
+        let provider: std::sync::Arc<dyn crate::provider::Provider> = match spec {
+            AnthropicRuntimeSpec::Default => std::sync::Arc::new(AnthropicProvider::new()),
+            AnthropicRuntimeSpec::NamedProfile { name, config } => {
+                std::sync::Arc::new(AnthropicProvider::new_for_named_profile(
+                    jcode_provider_anthropic_runtime::AnthropicProfileBinding::from_named_profile(
+                        name, &config,
+                    )?,
+                ))
+            }
+        };
+        Ok(provider)
+    });
     // OpenRouter serves several identities (aggregator, pinned API-key
     // runtime, direct OpenAI-compatible profiles, named config profiles)
     // through one concrete type, so it registers a parameterized factory.

@@ -76,6 +76,7 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -142,6 +143,7 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(Some(Arc::clone(&existing) as Arc<dyn Provider>)),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -178,6 +180,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -222,6 +225,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -285,6 +289,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -349,6 +354,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
 
                 let provider = MultiProvider {
                     anthropic: RwLock::new(None),
+                    anthropic_profile_binding: RwLock::new(None),
                     openai: RwLock::new(None),
                     copilot_api: RwLock::new(None),
                     antigravity: RwLock::new(None),
@@ -388,6 +394,7 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                 let _enter = runtime.enter();
                 let provider = MultiProvider {
                     anthropic: RwLock::new(None),
+                    anthropic_profile_binding: RwLock::new(None),
                     openai: RwLock::new(None),
                     copilot_api: RwLock::new(None),
                     antigravity: RwLock::new(None),
@@ -444,6 +451,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
 
             let provider = MultiProvider {
                 anthropic: RwLock::new(None),
+                anthropic_profile_binding: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
                 antigravity: RwLock::new(None),
@@ -524,6 +532,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -553,6 +562,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entries() {
     let provider = MultiProvider {
         anthropic: RwLock::new(None),
+        anthropic_profile_binding: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(Some(test_antigravity_runtime())),
@@ -698,6 +708,7 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),
@@ -740,6 +751,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
 
             let provider = MultiProvider {
                 anthropic: RwLock::new(None),
+                anthropic_profile_binding: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
                 antigravity: RwLock::new(None),

@@ -74,13 +74,24 @@ fn anthropic_auth_token_selects_bearer_without_affecting_explicit_profile_auth()
 #[test]
 fn named_profile_runtime_captures_transport_and_credential_immutably() {
     let _lock = jcode_base::storage::lock_test_env();
-    let _base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://one.example/v1");
-    let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "bearer");
-    let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "PROFILE_ONE_KEY");
     let _key = EnvVarGuard::set("PROFILE_ONE_KEY", "one-secret");
-    let provider = AnthropicProvider::new();
+    // The bound runtime is built from the profile config alone: no
+    // `JCODE_ANTHROPIC_*` env is consulted for URL, auth, or credential.
+    let _poisoned_base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://two.example/v1");
+    let provider = AnthropicProvider::new_for_named_profile(
+        AnthropicProfileBinding::from_named_profile(
+            "one",
+            &NamedProviderConfig {
+                provider_type: jcode_base::config::NamedProviderType::AnthropicCompatible,
+                base_url: "https://one.example/v1".to_string(),
+                auth: NamedProviderAuth::Bearer,
+                api_key_env: Some("PROFILE_ONE_KEY".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("binding"),
+    );
 
-    let _changed_base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://two.example/v1");
     let _changed_key = EnvVarGuard::set("PROFILE_ONE_KEY", "two-secret");
     assert_eq!(
         provider.direct_transport.api_url,
@@ -88,7 +99,13 @@ fn named_profile_runtime_captures_transport_and_credential_immutably() {
     );
     assert_eq!(provider.direct_transport.auth_mode, "bearer");
     assert_eq!(
-        provider.profile_api_key.as_ref().unwrap().as_ref().unwrap(),
+        provider
+            .profile_binding
+            .as_ref()
+            .unwrap()
+            .resolved_api_key
+            .as_ref()
+            .unwrap(),
         "one-secret"
     );
 }

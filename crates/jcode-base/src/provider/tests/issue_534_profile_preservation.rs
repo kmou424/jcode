@@ -46,6 +46,7 @@ input = ["text"]
 
         let provider = MultiProvider {
             anthropic: RwLock::new(None),
+            anthropic_profile_binding: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
             antigravity: RwLock::new(None),

@@ -130,22 +130,47 @@ impl MultiProvider {
             );
         }
 
-        let anthropic = if has_claude_creds {
-            let provider =
-                external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME);
-            let active_profile_is_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
-                .ok()
-                .and_then(|name| cfg.providers.get(&name))
-                .is_some_and(|profile| {
+        // A named anthropic-compatible profile (selected via
+        // `default_provider = "<name>"` or `--provider-profile`) binds the
+        // anthropic slot to the profile's own channel: URL, credential, headers
+        // and auth come from `[providers.<name>]`, never from Anthropic's
+        // credential surfaces or the `JCODE_ANTHROPIC_*` env.
+        let mut anthropic_profile_binding: Option<(String, crate::config::NamedProviderConfig)> =
+            None;
+        let anthropic_named_profile = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+            .ok()
+            .or_else(|| default_named_provider_profile.clone())
+            .and_then(|name| {
+                cfg.providers.get(&name).and_then(|profile| {
                     matches!(
                         profile.provider_type,
                         crate::config::NamedProviderType::AnthropicCompatible
                     )
-                });
-            if active_profile_is_anthropic {
-                crate::provider_catalog::clear_anthropic_profile_env();
+                    .then(|| (name, profile.clone()))
+                })
+            });
+        let anthropic = if let Some((profile_name, profile_config)) = anthropic_named_profile {
+            crate::provider_catalog::clear_anthropic_profile_env();
+            match external::instantiate_anthropic_runtime(
+                external::AnthropicRuntimeSpec::NamedProfile {
+                    name: profile_name.clone(),
+                    config: profile_config.clone(),
+                },
+            ) {
+                Ok(provider) => {
+                    anthropic_profile_binding = Some((profile_name, profile_config));
+                    Some(provider)
+                }
+                Err(err) => {
+                    crate::logging::warn(&format!(
+                        "Failed to initialize anthropic-compatible provider profile '{}': {err:#}",
+                        profile_name
+                    ));
+                    None
+                }
             }
-            provider
+        } else if has_claude_creds {
+            external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
         };
@@ -309,6 +334,7 @@ impl MultiProvider {
 
         let result = Self {
             anthropic: RwLock::new(anthropic),
+            anthropic_profile_binding: RwLock::new(anthropic_profile_binding),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
             antigravity: RwLock::new(antigravity_provider),
@@ -413,6 +439,26 @@ impl MultiProvider {
     }
 
     pub(super) fn spawn_anthropic_catalog_refresh_if_needed(&self) {
+        if self
+            .anthropic_profile_binding
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        {
+            // A bound profile channel owns its catalog (static or fetched from
+            // its own base_url); never probe Anthropic credential/catalog.
+            let Some(provider) = self.anthropic_provider() else {
+                return;
+            };
+            tokio::spawn(async move {
+                if let Err(err) = provider.prefetch_models().await {
+                    crate::logging::info(&format!(
+                        "Failed to refresh named-profile model catalog: {err}"
+                    ));
+                }
+            });
+            return;
+        }
         let api_stale = anthropic::load_anthropic_api_key().is_ok()
             && should_refresh_anthropic_model_catalog_for_scope(
                 &anthropic_catalog_scope_for_route(false),

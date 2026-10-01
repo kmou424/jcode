@@ -50,17 +50,222 @@ use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+pub use jcode_base::config::{NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig};
+
 /// Anthropic Messages API endpoint
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+/// Immutable binding that turns the direct Anthropic transport into a true
+/// custom channel for a `[providers.<name>]` anthropic-compatible profile.
+///
+/// A bound runtime resolves URL, credentials, headers, auth mode, and models
+/// exclusively from this struct: it never reads `ANTHROPIC_API_KEY`,
+/// `ANTHROPIC_AUTH_TOKEN`, `anthropic.env`, `auth.json`, or the
+/// `JCODE_ANTHROPIC_*` process env, and never falls back to
+/// `api.anthropic.com`. Error text names the profile instead of "Claude".
+#[derive(Debug, Clone)]
+pub struct AnthropicProfileBinding {
+    /// Config key of the profile (`[providers.<name>]`).
+    pub name: String,
+    /// Optional configured `display_name`; UI surfaces fall back to `name`.
+    pub display_name: Option<String>,
+    /// Normalized base URL (trailing `/` stripped).
+    pub base_url: String,
+    /// How requests authenticate: bearer, single header, or no auth.
+    pub auth: NamedProviderAuth,
+    /// Header name used when `auth` is `Header` (defaults to `x-api-key`).
+    pub auth_header: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    pub headers: BTreeMap<String, String>,
+    /// API key resolution captured at construction so later forks never re-run
+    /// `!{cmd}` substitution or re-read a changed process env.
+    pub resolved_api_key: std::result::Result<String, String>,
+    /// Profile's configured `default_model`, if any.
+    pub default_model: Option<String>,
+    /// Static `[[providers.<name>.models]]` declarations.
+    pub models: Vec<NamedProviderModelConfig>,
+    /// Whether the runtime may `GET {base_url}/models` to discover models.
+    pub model_catalog: bool,
+}
+
+impl AnthropicProfileBinding {
+    /// Build a binding from a `[providers.<name>]` config entry. Resolves the
+    /// profile's credential eagerly (inline `api_key` via `!{cmd}`/literal,
+    /// `api_key_env` via process env or `env_file`) and stores the *result* so
+    /// a forked provider cannot be redirected to different credentials.
+    ///
+    /// Construction is infallible on credential failure: the error is stored in
+    /// `resolved_api_key` and surfaces (named by profile) on the first request.
+    pub fn from_named_profile(
+        name: impl Into<String>,
+        config: &NamedProviderConfig,
+    ) -> Result<Self> {
+        let name = name.into();
+        let base_url =
+            jcode_base::provider_catalog::normalize_api_base(&config.base_url).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Provider profile '{name}' has invalid base_url '{}'. Use https://... or http://localhost.",
+                    config.base_url
+                )
+            })?;
+
+        let resolved_api_key =
+            Self::resolve_profile_api_key(&name, config).map_err(|err| format!("{err:#}"));
+
+        Ok(Self {
+            name,
+            display_name: config
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(ToString::to_string),
+            base_url,
+            auth: config.auth.clone(),
+            auth_header: config
+                .auth_header
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            headers: config.headers.clone(),
+            resolved_api_key,
+            default_model: config
+                .default_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            models: config.models.clone(),
+            model_catalog: config.model_catalog,
+        })
+    }
+
+    /// Resolve the profile's API key without consulting Anthropic's credential
+    /// chain. `auth = "none"` short-circuits to an empty key; `api_key_env`
+    /// reads the process env or the profile's `env_file`; inline `api_key`
+    /// supports `!{command}` substitution via `resolve_secret_value`.
+    fn resolve_profile_api_key(name: &str, config: &NamedProviderConfig) -> Result<String> {
+        if matches!(config.auth, NamedProviderAuth::None) {
+            return Ok(String::new());
+        }
+
+        if let Some(env_name) = config
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !jcode_base::provider_catalog::is_safe_env_key_name(env_name) {
+                anyhow::bail!("Provider profile '{name}' has invalid api_key_env '{env_name}'.");
+            }
+            if let Ok(value) = std::env::var(env_name)
+                && !value.trim().is_empty()
+            {
+                return Ok(value);
+            }
+            if let Some(env_file) = config
+                .env_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !jcode_base::provider_catalog::is_safe_env_file_name(env_file) {
+                    anyhow::bail!("Provider profile '{name}' has invalid env_file '{env_file}'.");
+                }
+                if let Some(value) = jcode_base::provider_catalog::load_env_value_from_config_file(
+                    env_name, env_file,
+                ) && !value.trim().is_empty()
+                {
+                    return Ok(value);
+                }
+            }
+            anyhow::bail!("Provider profile '{name}' credential '{env_name}' is not configured");
+        }
+
+        if let Some(key) = config
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let from_command = key.starts_with("!{");
+            let resolved = jcode_provider_env::resolve_secret_value(key).ok_or_else(|| {
+                anyhow::anyhow!("provider profile '{name}': api_key command substitution failed")
+            })?;
+            if !from_command {
+                jcode_base::logging::warn(&format!(
+                    "Provider profile '{name}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks."
+                ));
+            }
+            return Ok(resolved);
+        }
+
+        anyhow::bail!(
+            "Provider profile '{name}' has no credential: set api_key_env or api_key in [providers.{name}]"
+        )
+    }
+
+    /// Human-facing label: configured `display_name`, else the profile key.
+    pub fn label(&self) -> String {
+        self.display_name
+            .clone()
+            .unwrap_or_else(|| self.name.clone())
+    }
+
+    /// `POST` target for the Messages endpoint on this profile's gateway.
+    fn api_url(&self) -> String {
+        if self.base_url.ends_with("/messages") {
+            self.base_url.clone()
+        } else {
+            format!("{}/messages", self.base_url)
+        }
+    }
+
+    /// `GET` target for the model-catalog endpoint on this profile's gateway.
+    fn models_url(&self) -> String {
+        if let Some(stripped) = self.base_url.strip_suffix("/messages") {
+            format!("{stripped}/models")
+        } else {
+            format!("{}/models", self.base_url)
+        }
+    }
+
+    /// Auth mode string for the transport ("bearer" | "header" | "none").
+    fn auth_mode(&self) -> &'static str {
+        match self.auth {
+            NamedProviderAuth::Bearer => "bearer",
+            NamedProviderAuth::Header => "header",
+            NamedProviderAuth::None => "none",
+        }
+    }
+
+    /// Static model ids declared by the profile (plus `default_model` when not
+    /// already listed), mirroring `active_anthropic_profile_models`.
+    fn profile_models(&self) -> Vec<String> {
+        let mut models = self
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        if let Some(default) = &self.default_model
+            && !models.contains(default)
+        {
+            models.push(default.clone());
+        }
+        models
+    }
+}
 
 fn direct_api_url() -> String {
     let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
@@ -129,6 +334,54 @@ impl DirectTransportConfig {
             auth_mode: direct_auth_mode(),
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
                 .unwrap_or_else(|_| "x-api-key".to_string()),
+        }
+    }
+
+    /// Build transport settings entirely from the profile binding: URL, custom
+    /// headers, and auth mode come from `[providers.<name>]`, never from the
+    /// `JCODE_ANTHROPIC_*` env vars or Anthropic's credential surfaces.
+    fn from_binding(binding: &AnthropicProfileBinding) -> Self {
+        let mut headers = HeaderMap::new();
+        let mut headers_error = None;
+        for (name, value) in &binding.headers {
+            let parsed = HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| {
+                    format!(
+                        "provider profile '{}': invalid header name '{name}'",
+                        binding.name
+                    )
+                })
+                .and_then(|header_name| {
+                    HeaderValue::from_str(value)
+                        .map(|value| (header_name, value))
+                        .with_context(|| {
+                            format!(
+                                "provider profile '{}': invalid value for header '{name}'",
+                                binding.name
+                            )
+                        })
+                });
+            match parsed {
+                Ok((name, value)) => {
+                    headers.insert(name, value);
+                }
+                Err(err) => {
+                    headers_error = Some(format!("{err:#}"));
+                    break;
+                }
+            }
+        }
+        Self {
+            api_url: binding.api_url(),
+            headers: match headers_error {
+                Some(err) => Err(err),
+                None => Ok(headers),
+            },
+            auth_mode: binding.auth_mode().to_string(),
+            auth_header: binding
+                .auth_header
+                .clone()
+                .unwrap_or_else(|| "x-api-key".to_string()),
         }
     }
 }
@@ -477,10 +730,14 @@ pub struct AnthropicProvider {
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
     direct_transport: DirectTransportConfig,
-    /// Named profiles pin their credential at runtime construction so another
-    /// session/profile cannot redirect this runtime to a different process env.
-    profile_api_key: Option<std::result::Result<String, String>>,
-    profile_models: Option<Vec<String>>,
+    /// When set, this runtime is a named `[providers.<name>]` anthropic-
+    /// compatible channel: URL, credential, headers, auth mode, and models all
+    /// come from the binding, never from Anthropic's credential surfaces or
+    /// the `JCODE_ANTHROPIC_*` env vars.
+    profile_binding: Option<AnthropicProfileBinding>,
+    /// Live model ids fetched from a bound profile's `GET /models` catalog
+    /// (only populated when `model_catalog = true`).
+    profile_catalog_models: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl AnthropicProvider {
@@ -623,6 +880,127 @@ impl AnthropicProvider {
         Ok(())
     }
 
+    /// Fetch `GET {base_url}/models` for a bound profile channel and remember
+    /// the live ids for `available_models_for_switching`. Never touches
+    /// `api.anthropic.com`. Auth honors the profile's configured mode (bearer /
+    /// custom header / none) plus any extra `headers`.
+    async fn refresh_profile_model_catalog(&self, binding: &AnthropicProfileBinding) -> Result<()> {
+        let token = match &binding.resolved_api_key {
+            Ok(key) => key.clone(),
+            Err(err) => anyhow::bail!("{}", err.clone()),
+        };
+        let client = self.client.clone();
+        let headers = self.configured_direct_headers()?;
+        let url = binding.models_url();
+        let auth_mode = self.direct_auth_mode();
+        let auth_header = binding
+            .auth_header
+            .clone()
+            .unwrap_or_else(|| "x-api-key".to_string());
+
+        let mut available = std::collections::HashSet::new();
+        let mut limits = std::collections::HashMap::new();
+        let mut after_id: Option<String> = None;
+
+        loop {
+            let mut req = client
+                .get(&url)
+                .headers(headers.clone())
+                .header("anthropic-version", API_VERSION)
+                .query(&[("limit", "1000")]);
+            match auth_mode.as_str() {
+                "bearer" => {
+                    req = req.header("Authorization", format!("Bearer {token}"));
+                }
+                "header" => {
+                    let header = HeaderName::from_bytes(auth_header.trim().as_bytes())
+                        .with_context(|| {
+                            format!(
+                                "provider profile '{}': invalid auth_header '{auth_header}'",
+                                binding.name
+                            )
+                        })?;
+                    req = req.header(header, &token);
+                }
+                _ => {}
+            }
+            if let Some(after) = &after_id {
+                req = req.query(&[("after_id", after.as_str())]);
+            }
+
+            let resp = req
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "provider profile '{}': failed to fetch model catalog",
+                        binding.name
+                    )
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                anyhow::bail!(
+                    "provider profile '{}': model catalog returned {}: {}",
+                    binding.name,
+                    status,
+                    body
+                );
+            }
+
+            let data: serde_json::Value = resp.json().await.with_context(|| {
+                format!(
+                    "provider profile '{}': model catalog response was not JSON",
+                    binding.name
+                )
+            })?;
+            for entry in data
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                    let id = id.to_string();
+                    if let Some(limit) = entry
+                        .get("context_window")
+                        .or_else(|| entry.get("context_limit"))
+                        .and_then(Value::as_u64)
+                    {
+                        limits.insert(id.clone(), limit as usize);
+                    }
+                    available.insert(id);
+                }
+            }
+
+            let has_more = data
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let next = data
+                .get("last_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if !has_more {
+                break;
+            }
+            let Some(next) = next else { break };
+            after_id = Some(next);
+        }
+
+        let mut models: Vec<String> = available.into_iter().collect();
+        models.sort();
+        *self
+            .profile_catalog_models
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = models;
+        if !limits.is_empty() {
+            jcode_base::provider::populate_context_limits(limits);
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
             if Self::is_usage_exhausted() {
@@ -650,9 +1028,6 @@ impl AnthropicProvider {
             .map(|effort| Self::store_effort_for_model(&model, &effort));
 
         let direct_transport = DirectTransportConfig::from_env();
-        let profile_api_key = std::env::var_os("JCODE_ANTHROPIC_API_BASE")
-            .map(|_| load_anthropic_api_key().map_err(|err| format!("{err:#}")));
-        let profile_models = active_anthropic_profile_models();
 
         Self {
             client: jcode_provider_core::shared_http_client(),
@@ -667,17 +1042,120 @@ impl AnthropicProvider {
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
             direct_transport,
-            profile_api_key,
-            profile_models,
+            profile_binding: None,
+            profile_catalog_models: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
-    fn direct_api_key(&self) -> Result<String> {
-        match &self.profile_api_key {
-            Some(Ok(key)) => Ok(key.clone()),
-            Some(Err(err)) => anyhow::bail!(err.clone()),
-            None => load_anthropic_api_key(),
+    /// Construct a runtime bound to a named anthropic-compatible profile.
+    ///
+    /// Everything the profile channel needs (base URL, credential, headers,
+    /// auth mode, models) comes from `binding`; this constructor reads no
+    /// `JCODE_ANTHROPIC_*`, `ANTHROPIC_*`, or `JCODE_NAMED_PROVIDER_PROFILE`
+    /// env vars and never touches `auth.json`/`anthropic.env`.
+    pub fn new_for_named_profile(binding: AnthropicProfileBinding) -> Self {
+        let model = binding
+            .default_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+        let max_tokens_override = std::env::var("JCODE_ANTHROPIC_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
+        let reasoning_effort = jcode_base::config::config()
+            .provider
+            .anthropic_reasoning_effort
+            .as_deref()
+            .and_then(Self::normalize_reasoning_effort)
+            .map(|effort| Self::store_effort_for_model(&model, &effort));
+
+        let direct_transport = DirectTransportConfig::from_binding(&binding);
+
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(std::sync::RwLock::new(model)),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(reasoning_effort)),
+            service_tier: Arc::new(std::sync::RwLock::new(None)),
+            credentials: Arc::new(RwLock::new(None)),
+            // A named profile is always an explicit credential channel; it can
+            // never resolve to OAuth or Auto against api.anthropic.com.
+            credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::ApiKey)),
+            max_tokens_override,
+            oauth_session_id: Uuid::new_v4().to_string(),
+            oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            direct_transport,
+            profile_binding: Some(binding),
+            profile_catalog_models: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    /// The named-profile binding this runtime was built with, if any. Forks and
+    /// re-binds use this to re-create the channel without process env.
+    pub fn profile_binding(&self) -> Option<&AnthropicProfileBinding> {
+        self.profile_binding.as_ref()
+    }
+
+    /// Human-facing label for the bound profile, or `None` when unbound.
+    /// Used by the UI so the header shows the profile's `display_name` (or key)
+    /// instead of "Claude".
+    pub fn named_profile_display_name(&self) -> Option<String> {
+        self.profile_binding.as_ref().map(|b| b.label())
+    }
+
+    fn direct_api_key(&self) -> Result<String> {
+        if let Some(binding) = &self.profile_binding {
+            // A bound profile resolves its credential only from the binding's
+            // eagerly-captured result. Never read ANTHROPIC_API_KEY /
+            // ANTHROPIC_AUTH_TOKEN / anthropic.env here.
+            return match &binding.resolved_api_key {
+                Ok(key) => Ok(key.clone()),
+                Err(err) => anyhow::bail!("{}", err.clone()),
+            };
+        }
+        load_anthropic_api_key()
+    }
+
+    /// `direct_api_url()` consults the binding first so a named profile never
+    /// falls back to `api.anthropic.com` or env-derived bases.
+    fn direct_api_url(&self) -> String {
+        if let Some(binding) = &self.profile_binding {
+            return binding.api_url();
+        }
+        direct_api_url()
+    }
+
+    /// Extra request headers come from the binding's `headers` map when bound;
+    /// otherwise the legacy `JCODE_ANTHROPIC_HEADERS` env chain applies.
+    fn configured_direct_headers(&self) -> Result<HeaderMap> {
+        if let Some(binding) = &self.profile_binding {
+            let mut result = HeaderMap::new();
+            for (name, value) in &binding.headers {
+                let name = HeaderName::from_bytes(name.as_bytes()).with_context(|| {
+                    format!(
+                        "provider profile '{}': invalid header name '{name}'",
+                        binding.name
+                    )
+                })?;
+                let value = HeaderValue::from_str(value).with_context(|| {
+                    format!(
+                        "provider profile '{}': invalid value for header '{name}'",
+                        binding.name
+                    )
+                })?;
+                result.insert(name, value);
+            }
+            return Ok(result);
+        }
+        configured_direct_headers()
+    }
+
+    /// Auth mode: bound profiles resolve `auth`/`auth_header` from config and
+    /// never consult `ANTHROPIC_AUTH_TOKEN` or `JCODE_ANTHROPIC_AUTH`.
+    fn direct_auth_mode(&self) -> String {
+        if let Some(binding) = &self.profile_binding {
+            return binding.auth_mode().to_string();
+        }
+        direct_auth_mode()
     }
 
     fn normalized_model_key(model: &str) -> String {
@@ -983,6 +1461,16 @@ impl AnthropicProvider {
         // Explicit API-key mode: use the direct API key and surface an error if
         // one is not configured (never silently fall back to OAuth).
         if matches!(mode, AnthropicCredentialMode::ApiKey) {
+            if let Some(binding) = &self.profile_binding {
+                // Profile-bound channel: return the eagerly-resolved key. The
+                // stored error already names the profile; it is never a Claude
+                // credential error.
+                let key = match &binding.resolved_api_key {
+                    Ok(key) => key.clone(),
+                    Err(err) => anyhow::bail!("{}", err.clone()),
+                };
+                return Ok((key, false));
+            }
             let key = self.direct_api_key()?;
             return Ok((key, false)); // false = not OAuth
         }
@@ -1110,6 +1598,19 @@ impl AnthropicProvider {
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
+        if let Some(binding) = &self.profile_binding {
+            // A named profile is a fixed credential channel: switching it to
+            // OAuth or Auto would re-introduce Claude/Anthropic credential
+            // surfaces. The only valid mode is ApiKey (which also covers
+            // `auth = "none"` endpoints).
+            if !matches!(mode, AnthropicCredentialMode::ApiKey) {
+                anyhow::bail!(
+                    "provider profile '{}' uses its own configured credential; OAuth is not available for anthropic-compatible profiles",
+                    binding.name
+                );
+            }
+            return Ok(());
+        }
         match mode {
             AnthropicCredentialMode::Auto => {}
             AnthropicCredentialMode::ApiKey => {
@@ -1303,6 +1804,7 @@ impl Provider for AnthropicProvider {
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
         let retry_settings = reasoning_request::RetrySettings::from_provider(self);
+        let profile_binding = self.profile_binding.clone();
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
@@ -1328,6 +1830,7 @@ impl Provider for AnthropicProvider {
                 model_state,
                 direct_transport,
                 retry_settings,
+                profile_binding.clone(),
             )
             .await;
         });
@@ -1364,15 +1867,38 @@ impl Provider for AnthropicProvider {
         } else {
             model
         };
-        if !self
-            .profile_models
-            .as_ref()
-            .is_some_and(|models| models.iter().any(|configured| configured == model))
-            && !jcode_base::provider::known_anthropic_model_ids()
-                .iter()
-                .any(|known| known == model)
-        {
-            anyhow::bail!("Model {} not supported by Anthropic provider", model);
+        if let Some(binding) = self.profile_binding.as_ref() {
+            // A bound profile accepts only what the channel actually serves:
+            // the declared `[[models]]`/`default_model` plus a fetched catalog.
+            // When the profile declares nothing and catalog fetch is off,
+            // accept the caller's model rather than hard-fail the switch.
+            let mut allowed = binding.profile_models();
+            let catalog = self
+                .profile_catalog_models
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            for id in catalog {
+                if !allowed.contains(&id) {
+                    allowed.push(id);
+                }
+            }
+            if !allowed.is_empty() && !allowed.iter().any(|configured| configured == model) {
+                anyhow::bail!(
+                    "provider profile '{}': model '{}' is not declared by the profile or its catalog",
+                    binding.name,
+                    model
+                );
+            }
+        } else {
+            let profile_models = active_anthropic_profile_models().unwrap_or_default();
+            if !profile_models.iter().any(|configured| configured == model)
+                && !jcode_base::provider::known_anthropic_model_ids()
+                    .iter()
+                    .any(|known| known == model)
+            {
+                anyhow::bail!("Model {} not supported by Anthropic provider", model);
+            }
         }
         *self
             .model
@@ -1399,6 +1925,22 @@ impl Provider for AnthropicProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
+        if let Some(binding) = &self.profile_binding {
+            // Bound profile channel: static `[[models]]` plus a fetched catalog;
+            // never the built-in Anthropic catalog.
+            let mut models = binding.profile_models();
+            let catalog = self
+                .profile_catalog_models
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            for id in catalog {
+                if !models.contains(&id) {
+                    models.push(id);
+                }
+            }
+            return models;
+        }
         // Include both routes for model resolution. The picker reads each
         // route's scoped snapshot and never copies these IDs across routes.
         jcode_base::provider::known_anthropic_model_ids()
@@ -1516,6 +2058,15 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if let Some(binding) = &self.profile_binding {
+            // A bound profile is a fully custom channel: never touch
+            // api.anthropic.com's catalog. Honor `model_catalog`; when off, the
+            // static `[[providers.<name>.models]]` list is authoritative.
+            if !binding.model_catalog {
+                return Ok(());
+            }
+            return self.refresh_profile_model_catalog(binding).await;
+        }
         if self.direct_transport.api_url != API_URL {
             // Never send named gateway credentials to Anthropic's catalog.
             return Ok(());
@@ -1552,6 +2103,18 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn runtime_display_name(&self) -> String {
+        // A bound profile channel labels itself by the profile's
+        // `display_name` (or key), never "Claude"/"Anthropic".
+        self.named_profile_display_name()
+            .unwrap_or_else(|| self.display_name())
+    }
+
+    fn display_name(&self) -> String {
+        self.named_profile_display_name()
+            .unwrap_or_else(|| self.name().to_string())
+    }
+
     fn context_window(&self) -> usize {
         context_window::resolve(&self.model())
     }
@@ -1564,7 +2127,7 @@ impl Provider for AnthropicProvider {
         // Deferred loading and `tool_reference` are first-party Messages API
         // features. Custom gateways (JCODE_ANTHROPIC_API_URL) may proxy a
         // different backend that rejects the fields, so keep them eager there.
-        self.direct_transport.api_url == API_URL
+        self.direct_api_url() == API_URL
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -1586,8 +2149,13 @@ impl Provider for AnthropicProvider {
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
             direct_transport: self.direct_transport.clone(),
-            profile_api_key: self.profile_api_key.clone(),
-            profile_models: self.profile_models.clone(),
+            profile_binding: self.profile_binding.clone(),
+            profile_catalog_models: Arc::new(std::sync::RwLock::new(
+                self.profile_catalog_models
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
         })
     }
 
@@ -1675,6 +2243,7 @@ impl Provider for AnthropicProvider {
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
         let retry_settings = reasoning_request::RetrySettings::from_provider(self);
+        let profile_binding = self.profile_binding.clone();
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
@@ -1699,6 +2268,7 @@ impl Provider for AnthropicProvider {
                 model_state,
                 direct_transport,
                 retry_settings,
+                profile_binding.clone(),
             )
             .await;
         });
@@ -1723,6 +2293,7 @@ async fn run_stream_with_retries(
     model_state: Arc<std::sync::RwLock<String>>,
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
+    profile_binding: Option<AnthropicProfileBinding>,
 ) {
     let mut token = initial_token;
     let mut last_error = None;
@@ -1841,7 +2412,8 @@ async fn run_stream_with_retries(
                 // recommendation, then the curated flagship-first quality order,
                 // and never downgrades to a cheaper tier when a stronger model is
                 // available (see `anthropic_fallback_model`).
-                if is_model_not_found_error(&error_str)
+                if profile_binding.is_none()
+                    && is_model_not_found_error(&error_str)
                     && !saw_output
                     && let Some(fallback) = anthropic_fallback_model(&tried_models, &error_str)
                 {
@@ -1873,7 +2445,8 @@ async fn run_stream_with_retries(
                 // Anthropic OAuth can reject Fable with a model-scoped weekly
                 // quota error before the usage cache observes the exhausted
                 // window. This is terminal for Fable, not a transient 429.
-                if is_oauth
+                if profile_binding.is_none()
+                    && is_oauth
                     && !saw_output
                     && is_fable_scoped_limit_error(&model_name, &error_str)
                     && let Some(fallback) =
@@ -1954,12 +2527,18 @@ async fn run_stream_with_retries(
 
                 // Non-retryable or final attempt
                 if is_oauth && is_oauth_auth_error(&error_str) {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
+                    let message = if let Some(binding) = &profile_binding {
+                        format!(
+                            "{}\n\nProvider profile '{}' authentication failed; check its configured credential.",
+                            e, binding.name
+                        )
+                    } else {
+                        format!(
                             "{}\n\nClaude OAuth authentication failed. Run `jcode login --provider claude` (preferred) or `claude`, then retry.",
                             e
-                        )))
-                        .await;
+                        )
+                    };
+                    let _ = tx.send(Err(anyhow::anyhow!(message))).await;
                 } else {
                     let _ = tx.send(Err(e)).await;
                 }

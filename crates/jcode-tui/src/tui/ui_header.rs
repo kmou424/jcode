@@ -486,6 +486,24 @@ fn header_provider_auth_tag(
             }
         }
         "openrouter" | "openai-compatible" => "api-key",
+        // Named `[providers.<name>]` profiles (any wire type: openai-compatible,
+        // anthropic-compatible) always authenticate with their own configured
+        // key — never OAuth — so the tag is `api-key` (or none when the
+        // profile sets `auth = "none"`, where an empty tag is less confusing).
+        other
+            if crate::config::config()
+                .providers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case(other))
+                || crate::config::config().providers.values().any(|profile| {
+                    profile
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|label| label.trim().eq_ignore_ascii_case(other))
+                }) =>
+        {
+            "api-key"
+        }
         other
             if crate::provider_catalog::resolve_openai_compatible_profile_selection(other)
                 .is_some()

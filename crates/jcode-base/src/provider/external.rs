@@ -33,6 +33,27 @@ pub const COPILOT_RUNTIME: &str = "copilot";
 /// Registry key for the direct Anthropic API provider runtime.
 pub const ANTHROPIC_RUNTIME: &str = "anthropic";
 
+/// Construction spec for the direct Anthropic transport runtime.
+///
+/// The same concrete runtime serves both built-in Claude credentials (OAuth
+/// subscription / `ANTHROPIC_API_KEY`) and user-defined anthropic-compatible
+/// named profiles (`[providers.<name>]` with `type = "anthropic-compatible"`),
+/// so the composition root registers one parameterized factory, mirroring
+/// [`OpenRouterRuntimeSpec`].
+#[derive(Debug, Clone)]
+pub enum AnthropicRuntimeSpec {
+    /// Environment-derived default runtime (`AnthropicProvider::new()`): built-in
+    /// Claude OAuth/API-key surfaces plus legacy `JCODE_ANTHROPIC_*` env.
+    Default,
+    /// Bound to a named `[providers.<name>]` anthropic-compatible profile: a
+    /// custom channel whose URL, credential, headers, auth, and models all come
+    /// from `config` — never from Anthropic's credential surfaces.
+    NamedProfile {
+        name: String,
+        config: crate::config::NamedProviderConfig,
+    },
+}
+
 /// Registry key for the OpenAI (Codex) provider runtime.
 pub const OPENAI_RUNTIME: &str = "openai";
 
@@ -175,6 +196,67 @@ pub fn instantiate_openrouter_runtime(
             "no OpenRouter runtime factory registered; the composition root must call \
              register_openrouter_factory() at startup"
         ),
+    }
+}
+
+/// Parameterized factory for the Anthropic transport runtime. Serves both the
+/// built-in Claude credential channel ([`AnthropicRuntimeSpec::Default`]) and
+/// named `[providers.<name>]` anthropic-compatible profiles
+/// ([`AnthropicRuntimeSpec::NamedProfile`]).
+type AnthropicFactory =
+    Arc<dyn Fn(AnthropicRuntimeSpec) -> anyhow::Result<Arc<dyn Provider>> + Send + Sync>;
+
+fn anthropic_factory_slot() -> &'static RwLock<Option<AnthropicFactory>> {
+    static SLOT: OnceLock<RwLock<Option<AnthropicFactory>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+/// Register the parameterized Anthropic runtime factory.
+///
+/// Supersedes the zero-arg [`register_external_provider`] for `ANTHROPIC_RUNTIME`:
+/// the composition root should register both (the plain factory for legacy
+/// `instantiate_expected_external_provider(ANTHROPIC_RUNTIME)` callers, and this
+/// one for profile-bound construction). `instantiate_anthropic_runtime` falls
+/// back to the plain registry for `Default` when no parameterized factory is
+/// registered, so test binaries that only call `register_external_provider`
+/// keep working.
+pub fn register_anthropic_factory<F>(factory: F)
+where
+    F: Fn(AnthropicRuntimeSpec) -> anyhow::Result<Arc<dyn Provider>> + Send + Sync + 'static,
+{
+    *anthropic_factory_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(factory));
+}
+
+/// Instantiate an Anthropic transport runtime for `spec`.
+///
+/// `NamedProfile` requires the parameterized factory (it builds a
+/// profile-bound channel). `Default` falls back to the plain
+/// `ANTHROPIC_RUNTIME` registry entry when no parameterized factory exists.
+pub fn instantiate_anthropic_runtime(
+    spec: AnthropicRuntimeSpec,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    let factory = anthropic_factory_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    match (factory, &spec) {
+        (Some(factory), _) => factory(spec),
+        (None, AnthropicRuntimeSpec::Default) => instantiate_external_provider(ANTHROPIC_RUNTIME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no Anthropic runtime factory registered; the composition root must call \
+                     register_anthropic_factory() or register_external_provider(ANTHROPIC_RUNTIME) \
+                     at startup"
+                )
+            }),
+        (None, AnthropicRuntimeSpec::NamedProfile { .. }) => {
+            anyhow::bail!(
+                "no parameterized Anthropic runtime factory registered; the composition root must \
+                 call register_anthropic_factory() at startup"
+            )
+        }
     }
 }
 

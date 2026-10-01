@@ -8,6 +8,17 @@ impl MultiProvider {
             .clone()
     }
 
+    /// Name of the `[providers.<name>]` anthropic-compatible profile the
+    /// anthropic slot is bound to, if any. Used to keep error text and labels
+    /// on profile surfaces instead of built-in Claude wording.
+    pub(super) fn bound_anthropic_profile_name(&self) -> Option<String> {
+        self.anthropic_profile_binding
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|(name, _)| name.clone())
+    }
+
     pub(super) fn openai_provider(&self) -> Option<Arc<dyn Provider>> {
         self.openai
             .read()
