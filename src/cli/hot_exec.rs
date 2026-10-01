@@ -249,10 +249,16 @@ fn claim_update_fetch_slot() -> bool {
     std::fs::write(&marker, b"").is_ok()
 }
 
-/// `None` means this local checkout has no tracking branch, not a failed check.
+/// `None` means this local checkout has no tracking branch, is detached, or
+/// the process is not running from a jcode source checkout — all quiet skips,
+/// not failures.
 pub fn check_for_updates() -> Result<Option<bool>> {
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode source repository"))?;
+    let Some(repo_dir) = get_repo_dir() else {
+        // Launched from an installed binary outside any jcode source tree:
+        // there is no source checkout to update, so report Skipped rather than
+        // an error card ("Could not find jcode source repository").
+        return Ok(None);
+    };
     check_for_updates_in(&repo_dir, claim_update_fetch_slot)
 }
 
