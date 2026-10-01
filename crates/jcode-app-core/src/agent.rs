@@ -636,8 +636,7 @@ impl Agent {
             }
         };
         manager.reset();
-        let budget = self.provider.context_window();
-        manager.set_budget(budget);
+        self.configure_compaction_manager(&mut manager);
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {
@@ -812,7 +811,7 @@ impl Agent {
         self.session.compaction = Some(state.clone());
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            self.configure_compaction_manager(&mut manager);
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
         }
 
@@ -839,6 +838,7 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
+                    self.configure_compaction_manager(&mut manager);
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {

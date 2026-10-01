@@ -476,6 +476,17 @@ pub struct NamedProviderModelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub context_window: Option<usize>,
+    /// Token count at which compaction should trigger for this model.
+    ///
+    /// Local compaction uses this as its soft trigger while keeping the real
+    /// context window as the safety budget. Native OpenAI auto compaction
+    /// forwards it as `context_management[].compact_threshold`. A named
+    /// Responses profile opts configured GPT models into that native path when
+    /// `[provider].openai_native_compaction_mode` is `"auto"`.
+    /// Unset preserves the channel's existing default. Values are clamped to
+    /// the channel's context budget with a minimum of 1,000 tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_threshold_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<String>,
     /// Experimental feature tags enabled for this model (e.g.

@@ -190,7 +190,7 @@ impl Agent {
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
-            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Ok(mut manager) => self.configure_compaction_manager(&mut manager),
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),

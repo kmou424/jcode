@@ -1,7 +1,7 @@
 use super::{
     AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
     McpToolsMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig,
-    config_env_fingerprint, populate_context_limits_from_config_ref,
+    config_env_fingerprint,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -11,6 +11,14 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
         crate::env::set_var(key, previous);
     } else {
         crate::env::remove_var(key);
+    }
+}
+
+struct RemoteConfigReset;
+
+impl Drop for RemoteConfigReset {
+    fn drop(&mut self) {
+        super::set_remote_config_override(None);
     }
 }
 
@@ -1266,12 +1274,11 @@ impl Config {
 }
 
 #[test]
-fn populate_context_limits_from_config_ref_seeds_global_cache() {
+fn current_config_context_window_override_is_removed_on_replacement() {
     use super::{NamedProviderConfig, NamedProviderModelConfig};
 
-    // Regression test for issue #366: a named OpenAI-compatible provider with a
-    // per-model `context_window` must be honored by the global context-limit
-    // resolution path, not just the provider instance's own context_window().
+    let _lock = crate::storage::lock_test_env();
+    let _reset = RemoteConfigReset;
     let model_id = "issue366-custom-gateway-model";
     let mut cfg = Config::default();
     cfg.providers.insert(
@@ -1284,6 +1291,7 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
                 reasoning: None,
                 reasoning_effort: None,
                 context_window: Some(1_000_000),
+                compaction_threshold_tokens: None,
                 input: Vec::new(),
                 experimentals: Vec::new(),
             }],
@@ -1291,25 +1299,27 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
         },
     );
 
-    populate_context_limits_from_config_ref(&cfg);
+    super::set_remote_config_override(Some(cfg));
 
     assert_eq!(
         crate::provider::context_limit_for_model(model_id),
         Some(1_000_000),
         "global context-limit resolution should respect named provider context_window"
     );
+    assert_eq!(
+        crate::provider::context_limit_for_model_with_provider(model_id, Some("unknown-profile")),
+        None
+    );
+    super::set_remote_config_override(Some(Config::default()));
+    assert_eq!(crate::provider::context_limit_for_model(model_id), None);
 }
 
 #[test]
-fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
+fn current_config_context_window_resolves_qualified_runtime_model_shapes() {
     use super::{NamedProviderConfig, NamedProviderModelConfig};
 
-    // Regression test for issue #421: the runtime request model can be
-    // provider-qualified (`cachyai-a2000:qwen...`) or a slash path served by
-    // llama.cpp (`ornith-box-1:/opt/models/ornith-1.0-35b-Q4_K_M.gguf`). The
-    // configured context_window must resolve for every shape, not just the
-    // bare id, otherwise budgeting falls back to the 200K default and
-    // over-sends context.
+    let _lock = crate::storage::lock_test_env();
+    let _reset = RemoteConfigReset;
     let mut cfg = Config::default();
     cfg.providers.insert(
         "issue421-gateway".to_string(),
@@ -1322,6 +1332,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning: None,
                     reasoning_effort: None,
                     context_window: Some(131_072),
+                    compaction_threshold_tokens: None,
                     input: Vec::new(),
                     experimentals: Vec::new(),
                 },
@@ -1331,6 +1342,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning: None,
                     reasoning_effort: None,
                     context_window: Some(131_072),
+                    compaction_threshold_tokens: None,
                     input: Vec::new(),
                     experimentals: Vec::new(),
                 },
@@ -1339,7 +1351,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
         },
     );
 
-    populate_context_limits_from_config_ref(&cfg);
+    super::set_remote_config_override(Some(cfg));
 
     // Bare id.
     assert_eq!(
@@ -1752,6 +1764,7 @@ fn remote_config_override_wins_over_local_cache() {
 
     let mut remote = Config::default();
     remote.provider.default_model = Some("remote-model".to_string());
+    let _reset = RemoteConfigReset;
     crate::config::set_remote_config_override(Some(remote));
 
     assert!(crate::config::remote_config_override_active());
@@ -1768,4 +1781,216 @@ fn remote_config_override_wins_over_local_cache() {
         local_model.as_deref(),
         "clearing the override must restore local config reads"
     );
+}
+
+/// `[[providers.<name>.models]]` `compaction_threshold_tokens` is read by the
+/// per-model lookup helper. Both the bare id and the profile-qualified spec
+/// must resolve — runtime callers may see either shape.
+#[test]
+fn configured_compaction_threshold_resolves_per_model_entry() {
+    use super::{NamedProviderConfig, NamedProviderModelConfig};
+    use crate::provider::models::configured_model_entry_for_config;
+
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "sub2api-anthropic".to_string(),
+        NamedProviderConfig {
+            models: vec![
+                NamedProviderModelConfig {
+                    display_name: None,
+                    id: "claude-opus-5-5".to_string(),
+                    reasoning: None,
+                    reasoning_effort: None,
+                    context_window: Some(1_000_000),
+                    compaction_threshold_tokens: Some(272_000),
+                    input: Vec::new(),
+                    experimentals: Vec::new(),
+                },
+                NamedProviderModelConfig {
+                    display_name: None,
+                    id: "claude-sonnet-4-5".to_string(),
+                    reasoning: None,
+                    reasoning_effort: None,
+                    context_window: None,
+                    compaction_threshold_tokens: None,
+                    input: Vec::new(),
+                    experimentals: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
+    // Bare id resolves to the configured entry.
+    let entry = configured_model_entry_for_config(&cfg, None, "claude-opus-5-5").expect("entry");
+    assert_eq!(entry.compaction_threshold_tokens, Some(272_000));
+    assert_eq!(entry.context_window, Some(1_000_000));
+
+    // Profile-qualified spec resolves too.
+    let entry = configured_model_entry_for_config(
+        &cfg,
+        Some("sub2api-anthropic"),
+        "sub2api-anthropic:claude-opus-5-5",
+    )
+    .expect("qualified entry");
+    assert_eq!(entry.compaction_threshold_tokens, Some(272_000));
+
+    // Model without the field returns None on lookup.
+    let entry = configured_model_entry_for_config(&cfg, None, "claude-sonnet-4-5").expect("entry");
+    assert_eq!(entry.compaction_threshold_tokens, None);
+
+    // Unknown model returns None.
+    assert!(configured_model_entry_for_config(&cfg, None, "no-such-model").is_none());
+
+    // Wrong provider hint scopes the lookup so the same model id under a
+    // different profile doesn't leak through.
+    assert!(
+        configured_model_entry_for_config(&cfg, Some("other-profile"), "claude-opus-5-5").is_none()
+    );
+}
+
+#[test]
+fn current_config_model_overrides_are_scoped_to_profile() {
+    let _lock = crate::storage::lock_test_env();
+    let _reset = RemoteConfigReset;
+    let cfg: Config = toml::from_str(
+        r#"
+[[providers.first.models]]
+id = "profile-shared-model"
+context_window = 131072
+compaction_threshold_tokens = 100000
+[[providers.second.models]]
+id = "profile-shared-model"
+context_window = 262144
+compaction_threshold_tokens = 200000
+"#,
+    )
+    .unwrap();
+    super::set_remote_config_override(Some(cfg));
+    for (profile, window, threshold) in [("first", 131_072, 100_000), ("second", 262_144, 200_000)]
+    {
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "profile-shared-model",
+                Some(profile),
+            ),
+            Some(window)
+        );
+        assert_eq!(
+            crate::provider::configured_compaction_threshold(Some(profile), "profile-shared-model"),
+            Some(threshold)
+        );
+        let qualified = format!("{profile}:profile-shared-model");
+        assert_eq!(
+            crate::provider::context_limit_for_model(&qualified),
+            Some(window)
+        );
+        assert_eq!(
+            crate::provider::configured_compaction_threshold(None, &qualified),
+            Some(threshold)
+        );
+    }
+    for hint in [None, Some("unknown")] {
+        assert!(crate::provider::configured_model_entry(hint, "profile-shared-model").is_none());
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider("profile-shared-model", hint),
+            None
+        );
+        assert_eq!(
+            crate::provider::configured_compaction_threshold(hint, "profile-shared-model"),
+            None
+        );
+    }
+    assert!(
+        crate::provider::configured_model_entry(Some("second"), "first:profile-shared-model",)
+            .is_none()
+    );
+    assert_eq!(
+        crate::provider::configured_compaction_threshold(
+            Some("second"),
+            "first:profile-shared-model",
+        ),
+        None
+    );
+    assert_eq!(
+        crate::provider::context_limit_for_model_with_provider(
+            "first:profile-shared-model",
+            Some("second"),
+        ),
+        None
+    );
+    assert!(
+        crate::provider::configured_model_entry(Some("unknown"), "first:profile-shared-model")
+            .is_none()
+    );
+    super::set_remote_config_override(Some(Config::default()));
+    assert_eq!(
+        crate::provider::configured_compaction_threshold(Some("first"), "profile-shared-model"),
+        None
+    );
+    assert_eq!(
+        crate::provider::context_limit_for_model_with_provider(
+            "profile-shared-model",
+            Some("first"),
+        ),
+        None
+    );
+}
+
+#[test]
+fn configured_model_lookup_preserves_colons_and_prefers_exact_paths() {
+    use crate::provider::models::configured_model_entry_for_config;
+
+    let cfg: Config = toml::from_str(
+        r#"
+[[providers.first.models]]
+id = " qwen3:35b "
+context_window = 131072
+[[providers.first.models]]
+id = "/opt/models/shared.gguf"
+context_window = 100000
+[[providers.first.models]]
+id = "shared.gguf"
+context_window = 200000
+[[providers.first.models]]
+id = "vendor/model:tag"
+context_window = 300000
+[[providers.second.models]]
+id = "/other/shared.gguf"
+context_window = 400000
+"#,
+    )
+    .unwrap();
+    for (hint, model, window) in [
+        (None, " QWEN3:35B ", 131_072),
+        (None, "FIRST:qwen3:35b", 131_072),
+        (Some(" FIRST "), "first:qwen3:35b", 131_072),
+        (None, " /OPT/MODELS/SHARED.GGUF ", 100_000),
+        (None, "first:/opt/models/shared.gguf", 100_000),
+        (None, "shared.gguf", 200_000),
+        (None, "second:/other/shared.gguf", 400_000),
+        (None, "first:/another/vendor/model:tag", 300_000),
+        (None, "model:tag", 300_000),
+    ] {
+        assert_eq!(
+            configured_model_entry_for_config(&cfg, hint, model)
+                .and_then(|entry| entry.context_window),
+            Some(window),
+            "{hint:?} / {model}"
+        );
+    }
+    for (hint, model) in [
+        (None, "/third/shared.gguf"),
+        (Some("first"), "/third/shared.gguf"),
+        (Some("unknown"), "qwen3:35b"),
+        (Some("second"), "first:qwen3:35b"),
+        (None, "unknown:qwen3:35b"),
+        (None, "first:"),
+        (None, "/"),
+    ] {
+        assert!(
+            configured_model_entry_for_config(&cfg, hint, model).is_none(),
+            "{hint:?} / {model}"
+        );
+    }
 }

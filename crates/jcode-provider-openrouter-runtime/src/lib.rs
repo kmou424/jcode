@@ -1020,6 +1020,24 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    fn native_compaction_threshold_for_model(&self, model: &str) -> Option<usize> {
+        let profile = self.profile_id.as_deref()?;
+        let model = self.strip_session_profile_prefix(model);
+        if self.wire_api != WireApi::Responses
+            || !model.trim().to_ascii_lowercase().starts_with("gpt-")
+            || !jcode_base::config::config()
+                .provider
+                .openai_native_compaction_mode
+                .trim()
+                .eq_ignore_ascii_case("auto")
+        {
+            return None;
+        }
+        let threshold =
+            jcode_base::provider::configured_compaction_threshold(Some(profile), model)?;
+        Some(threshold.max(1000).min(self.context_window().max(1000)))
+    }
+
     /// Apply a real (already resolved) effort without changing the stored swarm mode.
     fn apply_resolved_reasoning_effort(
         &self,

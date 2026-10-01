@@ -737,6 +737,20 @@ impl Provider for OpenRouterProvider {
         true
     }
 
+    fn uses_jcode_compaction(&self) -> bool {
+        self.native_compaction_threshold_for_model(&self.model())
+            .is_none()
+    }
+
+    fn native_compaction_mode(&self) -> Option<String> {
+        self.native_compaction_threshold_for_model(&self.model())
+            .map(|_| "auto".to_string())
+    }
+
+    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        self.native_compaction_threshold_for_model(&self.model())
+    }
+
     fn preferred_provider(&self) -> Option<String> {
         self.preferred_provider()
     }
@@ -749,6 +763,18 @@ impl Provider for OpenRouterProvider {
         // the (large) provider default and over-budgeting the request. See #403.
         let raw_model = self.model();
         let model_id = self.strip_session_profile_prefix(&raw_model).to_string();
+        let current_profile = self.profile_id.as_deref().filter(|profile| {
+            jcode_base::config::config()
+                .providers
+                .contains_key(*profile)
+        });
+        if let Some(profile) = current_profile
+            && let Some(limit) =
+                jcode_base::provider::configured_model_entry(Some(profile), &model_id)
+                    .and_then(|entry| entry.context_window)
+        {
+            return limit;
+        }
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache
@@ -768,11 +794,11 @@ impl Provider for OpenRouterProvider {
             return ctx as usize;
         }
         let normalized_model_id = model_id.trim().to_ascii_lowercase();
-        if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
+        if current_profile.is_none()
+            && let Some(limit) = self.static_context_limits.get(&normalized_model_id)
+        {
             return *limit;
         }
-        // Config loading seeds explicit per-model context windows here. They
-        // must outrank built-in profile family guesses. See #1087.
         if let Some(limit) =
             jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
         {

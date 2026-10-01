@@ -367,6 +367,7 @@ fn named_openai_compatible_model_with_omitted_input_preserves_image_support() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "text-model".to_string(),
             context_window: Some(200_000),
+            compaction_threshold_tokens: None,
             ..Default::default()
         }],
         ..Default::default()
@@ -1528,6 +1529,10 @@ fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Rec
 }
 
 fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
+    spawn_single_response_sse_server("data: [DONE]\n\n")
+}
+
+fn spawn_single_response_sse_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
     let addr = listener.local_addr().expect("fake provider addr");
     let (request_tx, request_rx) = mpsc::channel();
@@ -1537,12 +1542,28 @@ fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set read timeout");
-        let mut request = vec![0u8; 16384];
-        let n = stream.read(&mut request).unwrap_or(0);
-        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let mut request = String::new();
+        loop {
+            let mut buffer = [0u8; 4096];
+            let n = stream.read(&mut buffer).expect("read request");
+            assert!(n > 0, "request ended before its body");
+            request.push_str(std::str::from_utf8(&buffer[..n]).expect("UTF-8 request"));
+            if let Some((headers, content)) = request.split_once("\r\n\r\n") {
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or(0);
+                if content.len() >= content_length {
+                    break;
+                }
+            }
+        }
         let _ = request_tx.send(request);
 
-        let body = "data: [DONE]\n\n";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -1554,6 +1575,156 @@ fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
     });
 
     (format!("http://{addr}/v1"), request_rx)
+}
+
+struct ClearRemoteConfig;
+
+impl Drop for ClearRemoteConfig {
+    fn drop(&mut self) {
+        jcode_base::config::set_remote_config_override(None);
+    }
+}
+
+#[test]
+fn named_responses_native_compaction_is_model_scoped_and_live() {
+    let _lock = ENV_LOCK.lock();
+    let _remote = ClearRemoteConfig;
+    let mut cfg = jcode_base::config::Config::default();
+    cfg.provider.openai_native_compaction_mode = "auto".into();
+    cfg.provider.openai_native_compaction_threshold_tokens = 160_000;
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        api: Some("openai-responses".into()),
+        default_model: Some("gpt-6.1-sol".into()),
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "gpt-6.1-sol".into(),
+                context_window: Some(1_000_000),
+                compaction_threshold_tokens: Some(272_000),
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "gpt-6-luna".into(),
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "deepseek-v4.1-flash".into(),
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    cfg.providers.insert("native-a".into(), profile.clone());
+    let mut other = profile.clone();
+    other.models[0].context_window = Some(128_000);
+    other.models[0].compaction_threshold_tokens = Some(90_000);
+    cfg.providers.insert("native-b".into(), other.clone());
+    jcode_base::config::set_remote_config_override(Some(cfg.clone()));
+    let provider = OpenRouterProvider::new_named_openai_compatible("native-a", &profile).unwrap();
+    let second = OpenRouterProvider::new_named_openai_compatible("native-b", &other).unwrap();
+    let _ambient = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "native-b");
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(272_000));
+    assert_eq!(provider.context_window(), 1_000_000);
+    assert_eq!(second.native_compaction_threshold_tokens(), Some(90_000));
+    assert_eq!(second.context_window(), 128_000);
+    assert!(!provider.uses_jcode_compaction());
+    assert_eq!(
+        provider.fork().native_compaction_threshold_tokens(),
+        Some(272_000)
+    );
+    for model in ["gpt-6-luna", "deepseek-v4.1-flash"] {
+        provider.set_model(model).unwrap();
+        assert!(provider.uses_jcode_compaction());
+        assert_eq!(provider.native_compaction_mode(), None);
+    }
+    provider.set_model("gpt-6.1-sol").unwrap();
+    for mode in ["off", "explicit"] {
+        cfg.provider.openai_native_compaction_mode = mode.into();
+        jcode_base::config::set_remote_config_override(Some(cfg.clone()));
+        assert!(provider.uses_jcode_compaction());
+        assert_eq!(provider.native_compaction_threshold_tokens(), None);
+    }
+    cfg.provider.openai_native_compaction_mode = "auto".into();
+    for (configured, expected) in [(0, 1000), (2_000_000, 1_000_000)] {
+        cfg.providers.get_mut("native-a").unwrap().models[0].compaction_threshold_tokens =
+            Some(configured);
+        jcode_base::config::set_remote_config_override(Some(cfg.clone()));
+        assert_eq!(
+            provider.native_compaction_threshold_tokens(),
+            Some(expected)
+        );
+    }
+    cfg.providers.get_mut("native-a").unwrap().models[0].compaction_threshold_tokens = None;
+    jcode_base::config::set_remote_config_override(Some(cfg));
+    assert!(provider.uses_jcode_compaction());
+    assert_eq!(provider.native_compaction_threshold_tokens(), None);
+}
+
+#[tokio::test]
+async fn named_responses_sends_per_model_threshold_and_replays_native_artifact() {
+    let _lock = ENV_LOCK.lock();
+    let _remote = ClearRemoteConfig;
+    let (base_url, requests) = spawn_single_response_sse_server(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"enc_returned\"}}\n\n\
+         data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":1}}}\n\n\
+         data: [DONE]\n\n",
+    );
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url,
+        auth: jcode_base::config::NamedProviderAuth::None,
+        api: Some("openai-responses".into()),
+        default_model: Some("gpt-6.1-sol".into()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "gpt-6.1-sol".into(),
+            context_window: Some(1_000_000),
+            compaction_threshold_tokens: Some(272_000),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut cfg = jcode_base::config::Config::default();
+    cfg.provider.openai_native_compaction_mode = "auto".into();
+    cfg.provider.openai_native_compaction_threshold_tokens = 160_000;
+    cfg.providers.insert("native-wire".into(), profile.clone());
+    jcode_base::config::set_remote_config_override(Some(cfg));
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("native-wire", &profile).unwrap();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::OpenAICompaction {
+            encrypted_content: "enc_previous".into(),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let mut stream = provider
+        .complete(&messages, &[], "test", None)
+        .await
+        .unwrap();
+    let mut artifact = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::Compaction {
+            openai_encrypted_content,
+            ..
+        } = event.unwrap()
+        {
+            artifact = openai_encrypted_content;
+        }
+    }
+    let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(request.starts_with("POST /v1/responses "));
+    let payload: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        payload["context_management"][0]["compact_threshold"],
+        272_000
+    );
+    assert_eq!(payload["input"][0]["type"], "compaction");
+    assert_eq!(payload["input"][0]["encrypted_content"], "enc_previous");
+    assert_eq!(artifact.as_deref(), Some("enc_returned"));
+    assert!(!provider.uses_jcode_compaction());
 }
 
 #[test]
@@ -2325,6 +2496,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
             display_name: None,
             id: "custom-long-context".to_string(),
             context_window: Some(512_000),
+            compaction_threshold_tokens: None,
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),
@@ -2356,6 +2528,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
             display_name: None,
             id: "qwen3.6-35b-a2000-128k".to_string(),
             context_window: Some(131_072),
+            compaction_threshold_tokens: None,
             reasoning: None,
             reasoning_effort: None,
             input: Vec::new(),

@@ -51,6 +51,130 @@ fn test_new_manager() {
 }
 
 #[test]
+fn local_soft_threshold_reactive_boundary_and_guards() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.mode = crate::config::CompactionMode::Reactive;
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "small message"))
+        .collect();
+
+    manager.update_observed_input_tokens(271_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(272_000);
+    assert!(manager.should_compact_with(&messages));
+    assert_eq!(manager.token_budget(), 1_000_000);
+    assert!(!manager.should_compact_with(&messages[..RECENT_TURNS_TO_KEEP]));
+
+    manager.seed_restored_messages_with(&messages);
+    assert!(!manager.should_compact_with(&messages));
+    manager.notify_message_added();
+    assert!(manager.should_compact_with(&messages));
+
+    manager.set_soft_compaction_threshold_tokens(None);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(799_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(800_000);
+    assert!(manager.should_compact_with(&messages));
+}
+
+#[test]
+fn local_soft_threshold_uses_estimate_when_larger_than_observed() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.mode = crate::config::CompactionMode::Reactive;
+    manager.set_soft_compaction_threshold_tokens(Some(1_000));
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, &"x".repeat(1_000)))
+        .collect();
+    manager.update_observed_input_tokens(10);
+    assert!(manager.should_compact_with(&messages));
+}
+
+#[test]
+fn local_soft_threshold_clamps_to_window_and_preserves_unset_default() {
+    let mut manager = CompactionManager::new().with_budget(128_000);
+    manager.mode = crate::config::CompactionMode::Reactive;
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    assert_eq!(manager.configured_soft_threshold(), Some(128_000));
+    manager.set_soft_compaction_threshold_tokens(Some(999));
+    assert_eq!(manager.configured_soft_threshold(), Some(1_000));
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    manager.token_budget = CompactionManager::capped_budget(
+        &crate::config::CompactionConfig {
+            max_context_tokens: 50_000,
+            ..Default::default()
+        },
+        1_000_000,
+    );
+    assert_eq!(manager.configured_soft_threshold(), Some(50_000));
+    assert_eq!(manager.token_budget(), 50_000);
+}
+
+#[test]
+fn local_soft_threshold_proactive_and_semantic_project_below_large_window_floor() {
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "small message"))
+        .collect();
+    for mode in [
+        crate::config::CompactionMode::Proactive,
+        crate::config::CompactionMode::Semantic,
+    ] {
+        let mut manager = CompactionManager::new().with_budget(1_000_000);
+        manager.mode = mode;
+        manager.compaction_config.proactive_floor = 0.5;
+        manager.compaction_config.min_samples = 2;
+        manager.compaction_config.stall_window = 2;
+        manager.compaction_config.min_turns_between_compactions = 2;
+        manager.compaction_config.lookahead_turns = 1;
+        manager.token_history = VecDeque::from([250_000, 261_000]);
+        manager.turns_since_last_compact = 2;
+        manager.update_observed_input_tokens(261_000);
+        assert!(!manager.should_compact_with(&messages));
+        manager.set_soft_compaction_threshold_tokens(Some(272_000));
+        assert!(manager.should_compact_with(&messages));
+        manager.compaction_config.proactive_floor = 0.9;
+        assert!(!manager.should_compact_with(&messages));
+        manager.compaction_config.proactive_floor = 0.5;
+        manager.turns_since_last_compact = 0;
+        assert!(!manager.should_compact_with(&messages));
+        manager.turns_since_last_compact = 2;
+        manager.token_history = VecDeque::from([261_000, 261_000]);
+        assert!(!manager.should_compact_with(&messages));
+    }
+}
+
+#[tokio::test]
+async fn local_soft_threshold_323k_starts_background_without_hard_drop() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.mode = crate::config::CompactionMode::Reactive;
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "small message"))
+        .collect();
+    manager.update_observed_input_tokens(323_000);
+    let action = manager.ensure_context_fits(&messages, Arc::new(MockSummaryProvider));
+    assert!(matches!(action, CompactionAction::BackgroundStarted { .. }));
+    assert_eq!(manager.compacted_count, 0);
+    assert_eq!(manager.token_budget(), 1_000_000);
+    assert!(!manager.should_compact_with(&messages));
+    manager.pending_task.take().unwrap().abort();
+}
+
+#[tokio::test]
+async fn local_soft_threshold_950k_still_hard_protects_real_window() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "small message"))
+        .collect();
+    manager.update_observed_input_tokens(950_000);
+    let action = manager.ensure_context_fits(&messages, Arc::new(MockSummaryProvider));
+    assert!(matches!(action, CompactionAction::HardCompacted(_)));
+    assert!(manager.compacted_count > 0);
+}
+
+#[test]
 fn test_notify_message_added() {
     let mut manager = CompactionManager::new();
     manager.notify_message_added();
@@ -1150,11 +1274,14 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     assert_eq!(manager.token_budget(), 50_000);
     manager.set_budget(1_000_000);
     assert_eq!(manager.token_budget(), 50_000);
+    manager.set_soft_compaction_threshold_tokens(Some(272_000));
+    assert_eq!(manager.configured_soft_threshold(), Some(50_000));
 
     cfg.compaction.max_context_tokens = 10_000;
     cfg.save().unwrap();
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 10_000);
+    assert_eq!(manager.configured_soft_threshold(), Some(10_000));
 
     cfg.compaction.max_context_tokens = 80_000;
     cfg.save().unwrap();
@@ -1165,4 +1292,5 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     cfg.save().unwrap();
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
+    assert_eq!(manager.configured_soft_threshold(), Some(128_000));
 }

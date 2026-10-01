@@ -1120,16 +1120,16 @@ impl OpenAIProvider {
 
     fn native_compaction_threshold_for_context_window(
         &self,
+        model_id: &str,
         context_window: usize,
     ) -> Option<usize> {
         if self.native_compaction_mode != OpenAINativeCompactionMode::Auto {
             return None;
         }
-        Some(
-            self.native_compaction_threshold_tokens
-                .max(1000)
-                .min(context_window.max(1000)),
-        )
+        let configured =
+            jcode_base::provider::configured_compaction_threshold(Some(self.name()), model_id);
+        let base = configured.unwrap_or(self.native_compaction_threshold_tokens);
+        Some(base.max(1000).min(context_window.max(1000)))
     }
 
     fn parse_max_output_tokens(raw: Option<&str>) -> Option<u32> {
@@ -1276,7 +1276,7 @@ impl OpenAIProvider {
             .map(|guard| guard.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let native_compaction_threshold =
-            self.native_compaction_threshold_for_context_window(self.context_window());
+            self.native_compaction_threshold_for_context_window(model_id, self.context_window());
         Self::build_response_request(
             model_id,
             system.to_string(),

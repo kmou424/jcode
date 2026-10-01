@@ -516,69 +516,6 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
     }
 }
 
-/// Populate the context limit cache from named provider model configs in the
-/// user's config file.
-///
-/// Custom OpenAI-compatible providers that lack a usable `/v1/models` endpoint
-/// rely on per-model `context_window` config. That value is honored by the
-/// provider instance's own `context_window()` method, but every other
-/// resolution path (TUI info widget, compaction budget, model switching) goes
-/// through the global [`CONTEXT_LIMIT_CACHE`] via
-/// [`context_limit_for_model_with_provider`]. Seed that cache here so the
-/// configured limit is respected globally instead of falling back to
-/// [`DEFAULT_CONTEXT_LIMIT`].
-pub fn populate_context_limits_from_config() {
-    populate_context_limits_from_config_value(crate::config::config());
-}
-
-/// Seed the global context-limit cache from an explicit config reference.
-///
-/// Runtime model specs reach the lookup in several shapes, so each configured
-/// model is seeded under every key the lookup can normalize to (issue #421):
-/// - the bare lowercased id (`qwen3.6-35b-a2000-128k`);
-/// - the slash base (`x.gguf` for `/opt/models/x.gguf`), because
-///   `model_id_for_capability_lookup` reduces slash-containing ids to their
-///   final segment;
-/// - the profile-qualified spec (`cachyai-a2000:qwen3.6-35b-a2000-128k`),
-///   because session-restored models keep the `<profile>:` routing prefix and
-///   non-slash qualified specs are looked up verbatim.
-pub fn populate_context_limits_from_config_value(cfg: &crate::config::Config) {
-    let mut limits = HashMap::new();
-    for (profile_id, provider_cfg) in cfg.providers.iter() {
-        for model in &provider_cfg.models {
-            let Some(limit) = model.context_window else {
-                continue;
-            };
-            for key in config_context_limit_cache_keys(profile_id, &model.id) {
-                limits.insert(key, limit);
-            }
-        }
-    }
-    if !limits.is_empty() {
-        populate_context_limits(limits);
-    }
-}
-
-/// Cache keys under which a configured per-model `context_window` must be
-/// discoverable so every runtime lookup shape resolves to it. See
-/// [`populate_context_limits_from_config_value`].
-pub(crate) fn config_context_limit_cache_keys(profile_id: &str, model_id: &str) -> Vec<String> {
-    let id = model_id.trim().to_ascii_lowercase();
-    if id.is_empty() {
-        return Vec::new();
-    }
-    let mut keys = vec![id.clone()];
-    let slash_base = jcode_provider_core::model_id::slash_base(&id).to_string();
-    if slash_base != id && !slash_base.is_empty() {
-        keys.push(slash_base);
-    }
-    let profile = profile_id.trim().to_ascii_lowercase();
-    if !profile.is_empty() {
-        keys.push(format!("{profile}:{id}"));
-    }
-    keys
-}
-
 /// Populate the account-available model list (called once at startup from the Codex API).
 pub fn populate_account_models(slugs: Vec<String>) {
     populate_account_models_for_scope(&current_openai_account_scope(), slugs);
@@ -1183,8 +1120,7 @@ pub fn get_best_available_openai_model() -> Option<String> {
 
 /// Return the context window size in tokens for a given model, if known.
 ///
-/// First checks the dynamic cache (populated from the Codex backend API at startup),
-/// then falls back to hardcoded defaults.
+/// Explicit current-config overrides take priority over catalog/static defaults.
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
     context_limit_for_model_with_provider(model, None)
 }
@@ -1193,11 +1129,98 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
+    // User config wins over every other source — including the verified
+    // Claude-generation table and the live catalog.
+    if let Some(limit) =
+        configured_model_entry(provider_hint, model).and_then(|entry| entry.context_window)
+    {
+        return Some(limit);
+    }
     context_limit_for_model_with_provider_and_cache(
         model,
         provider_hint,
         cached_context_limit_for_model,
     )
+}
+
+/// Find the `[[providers.<profile>.models]]` entry for `model_id` on provider
+/// `profile_id`, if any. Returns the parsed `ProviderModelEntry` so callers
+/// can read per-model overrides (context_window, compaction_threshold_tokens,
+/// reasoning_effort, …) without re-implementing the lookup.
+///
+/// `model_id` may be a bare id (`claude-opus-5-5`), a slash path
+/// (`/models/x.gguf` with basename fallback), or a
+/// profile-qualified spec (`sub2api-anthropic:claude-opus-5-5`). The
+/// `profile_id` hint selects which `providers.<name>` table to search; when
+/// `None` a known profile prefix selects that profile, otherwise every model
+/// list is scanned. Exact ids take priority over basename matches. Ambiguous
+/// matches and conflicting profile hints/prefixes return `None`.
+pub fn configured_model_entry(
+    provider_hint: Option<&str>,
+    model_id: &str,
+) -> Option<crate::config::NamedProviderModelConfig> {
+    configured_model_entry_for_config(crate::config::config(), provider_hint, model_id)
+}
+
+/// [`configured_model_entry`] against an explicit config — used by tests so
+/// they don't have to write to the global config store.
+pub(crate) fn configured_model_entry_for_config(
+    cfg: &crate::config::Config,
+    provider_hint: Option<&str>,
+    model_id: &str,
+) -> Option<crate::config::NamedProviderModelConfig> {
+    let normalized = model_id.trim().to_ascii_lowercase();
+    let qualified = normalized.split_once(':').filter(|(prefix, _)| {
+        cfg.providers
+            .iter()
+            .any(|(name, _)| name.trim().eq_ignore_ascii_case(prefix))
+    });
+    let hint = provider_hint.map(normalize_provider_id);
+    if let (Some(hint), Some((prefix, _))) = (hint.as_deref(), qualified)
+        && hint != prefix
+    {
+        return None;
+    }
+    let profile = hint.as_deref().or(qualified.map(|(prefix, _)| prefix));
+    let model = qualified
+        .map(|(_, tail)| tail)
+        .unwrap_or(&normalized)
+        .trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    let candidates: Vec<_> = cfg
+        .providers
+        .iter()
+        .filter(|(name, _)| profile.is_none_or(|profile| name.trim().eq_ignore_ascii_case(profile)))
+        .flat_map(|(_, provider)| provider.models.iter())
+        .collect();
+    for exact in [true, false] {
+        let mut matches = candidates.iter().copied().filter(|entry| {
+            let id = entry.id.trim().to_ascii_lowercase();
+            if exact {
+                id == model
+            } else {
+                let basename = jcode_provider_core::model_id::slash_base(model);
+                !basename.is_empty() && jcode_provider_core::model_id::slash_base(&id) == basename
+            }
+        });
+        if let Some(entry) = matches.next() {
+            return matches.next().is_none().then(|| entry.clone());
+        }
+    }
+    None
+}
+
+/// Resolve the compaction trigger threshold (in tokens) for a model.
+/// Per-model `compaction_threshold_tokens` wins when set; `None` otherwise —
+/// callers fall back to the channel's existing default.
+pub fn configured_compaction_threshold(
+    provider_hint: Option<&str>,
+    model_id: &str,
+) -> Option<usize> {
+    configured_model_entry(provider_hint, model_id)?.compaction_threshold_tokens
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {
@@ -1249,4 +1272,99 @@ pub fn provider_for_model_with_hint(
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
+}
+
+#[test]
+fn current_config_context_overrides_precede_static_and_catalog_defaults() {
+    let _lock = crate::storage::lock_test_env();
+    struct Reset {
+        cached: Vec<(String, Option<usize>)>,
+    }
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::config::set_remote_config_override(None);
+            let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+            for (model, previous) in self.cached.drain(..) {
+                if let Some(limit) = previous {
+                    cache.insert(model, limit);
+                } else {
+                    cache.remove(&model);
+                }
+            }
+        }
+    }
+    let models = [
+        ("claude", "claude-sonnet-4-5", 111_000),
+        ("copilot", "config-copilot-priority-model", 222_000),
+        ("gateway", "config-catalog-priority-model", 444_000),
+    ];
+    let mut reset = Reset { cached: Vec::new() };
+    {
+        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+        for (_, model, _) in models {
+            reset
+                .cached
+                .push((model.to_string(), cache.insert(model.to_string(), 333_000)));
+        }
+    }
+    let mut cfg = crate::config::Config::default();
+    for (profile, model, window) in models {
+        cfg.providers.insert(
+            profile.to_string(),
+            crate::config::NamedProviderConfig {
+                models: vec![crate::config::NamedProviderModelConfig {
+                    id: model.to_string(),
+                    context_window: Some(window),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+    }
+    crate::config::set_remote_config_override(Some(cfg.clone()));
+    for (profile, model, window) in models {
+        assert_eq!(
+            context_limit_for_model_with_provider(model, Some(profile)),
+            Some(window)
+        );
+    }
+    for (_, provider) in cfg.providers.iter_mut() {
+        for model in &mut provider.models {
+            model.context_window = None;
+        }
+    }
+    crate::config::set_remote_config_override(Some(cfg));
+    for (profile, model, _) in models {
+        assert_eq!(
+            context_limit_for_model_with_provider(model, Some(profile)),
+            context_limit_for_model_with_provider_and_cache(
+                model,
+                Some(profile),
+                cached_context_limit_for_model,
+            )
+        );
+    }
+    assert_eq!(
+        context_limit_for_model_with_provider("claude-sonnet-4-5", Some("claude")),
+        Some(200_000)
+    );
+    assert_eq!(
+        context_limit_for_model_with_provider("config-copilot-priority-model", Some("copilot")),
+        Some(128_000)
+    );
+    assert_eq!(
+        context_limit_for_model_with_provider("config-catalog-priority-model", Some("gateway")),
+        Some(333_000)
+    );
+    crate::config::set_remote_config_override(Some(crate::config::Config::default()));
+    for (profile, model, _) in models {
+        assert_eq!(
+            context_limit_for_model_with_provider(model, Some(profile)),
+            context_limit_for_model_with_provider_and_cache(
+                model,
+                Some(profile),
+                cached_context_limit_for_model,
+            )
+        );
+    }
 }

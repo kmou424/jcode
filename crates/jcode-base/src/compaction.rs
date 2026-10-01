@@ -170,6 +170,9 @@ pub struct CompactionManager {
     /// can restore the budget without switching models.
     model_token_budget: usize,
 
+    /// Optional model-specific soft trigger, independent of the safety budget.
+    soft_compaction_threshold_tokens: Option<usize>,
+
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
@@ -223,6 +226,7 @@ impl CompactionManager {
             suppress_compaction_until_new_message: false,
             token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
             model_token_budget: DEFAULT_TOKEN_BUDGET,
+            soft_compaction_threshold_tokens: None,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
@@ -249,6 +253,16 @@ impl CompactionManager {
     pub fn set_budget(&mut self, budget: usize) {
         self.model_token_budget = budget;
         self.refresh_context_cap();
+    }
+
+    /// Set a local soft trigger with the same minimum as native compaction.
+    pub fn set_soft_compaction_threshold_tokens(&mut self, threshold: Option<usize>) {
+        self.soft_compaction_threshold_tokens = threshold.map(|tokens| tokens.max(1_000));
+    }
+
+    fn configured_soft_threshold(&self) -> Option<usize> {
+        self.soft_compaction_threshold_tokens
+            .map(|tokens| tokens.min(self.token_budget))
     }
 
     fn refresh_context_cap(&mut self) {
@@ -491,8 +505,15 @@ impl CompactionManager {
         }
 
         // 2. Context below the proactive floor — too early regardless of trend.
-        let usage = self.context_usage_with(all_messages);
-        if usage < cfg.proactive_floor {
+        // Keep the floor proportional to the soft trigger, not the safety window.
+        let usage = match self.configured_soft_threshold() {
+            Some(threshold) => {
+                self.effective_token_count_with(all_messages) as f64
+                    / (threshold as f64 / COMPACTION_THRESHOLD as f64)
+            }
+            None => self.context_usage_with(all_messages) as f64,
+        };
+        if usage < cfg.proactive_floor as f64 {
             return true;
         }
 
@@ -540,7 +561,10 @@ impl CompactionManager {
 
         let cfg = &self.compaction_config;
         let budget = self.token_budget as f64;
-        let threshold = COMPACTION_THRESHOLD as f64 * budget;
+        let threshold = self
+            .configured_soft_threshold()
+            .map(|tokens| tokens as f64)
+            .unwrap_or(COMPACTION_THRESHOLD as f64 * budget);
 
         // Compute EWMA of per-turn token deltas.
         // We need at least 2 snapshots to get a delta.
@@ -866,7 +890,12 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && match self.configured_soft_threshold() {
+                        Some(threshold) => {
+                            self.effective_token_count_with(all_messages) >= threshold
+                        }
+                        None => self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD,
+                    }
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {

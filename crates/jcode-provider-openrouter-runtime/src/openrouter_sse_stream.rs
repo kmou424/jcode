@@ -486,6 +486,12 @@ impl OpenRouterProvider {
             }
         }
 
+        if let Some(threshold) = self.native_compaction_threshold_for_model(model) {
+            request["context_management"] = serde_json::json!([
+                { "type": "compaction", "compact_threshold": threshold }
+            ]);
+        }
+
         jcode_base::logging::info(&format!(
             "OpenAI-compatible transport: HTTPS (Responses SSE, model: {})",
             model

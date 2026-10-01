@@ -1022,8 +1022,15 @@ impl Provider for OpenAIProvider {
     }
 
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
-        (self.native_compaction_mode != OpenAINativeCompactionMode::Off)
-            .then_some(self.native_compaction_threshold_tokens)
+        if self.native_compaction_mode == OpenAINativeCompactionMode::Auto {
+            self.native_compaction_threshold_for_context_window(
+                &self.model(),
+                self.context_window(),
+            )
+        } else {
+            (self.native_compaction_mode != OpenAINativeCompactionMode::Off)
+                .then_some(self.native_compaction_threshold_tokens)
+        }
     }
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
@@ -1217,7 +1224,7 @@ impl Provider for OpenAIProvider {
 
     fn context_window(&self) -> usize {
         let model = self.model();
-        jcode_provider_core::context_limit_for_model_with_provider(&model, Some(self.name()))
+        jcode_base::provider::context_limit_for_model_with_provider(&model, Some(self.name()))
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 

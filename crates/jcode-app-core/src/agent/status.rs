@@ -189,6 +189,23 @@ impl Agent {
             .unwrap_or(model)
     }
 
+    /// Refresh safety budget and the local soft trigger for the current route.
+    pub(crate) fn configure_compaction_manager(
+        &self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) {
+        manager.set_budget(self.provider.context_window());
+        let threshold = if self.provider.uses_jcode_compaction() {
+            jcode_base::provider::configured_compaction_threshold(
+                self.session.provider_key.as_deref(),
+                &self.provider.model(),
+            )
+        } else {
+            None
+        };
+        manager.set_soft_compaction_threshold_tokens(threshold);
+    }
+
     pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
         if self
             .provider

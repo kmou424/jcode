@@ -239,12 +239,6 @@ static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
     // (e.g. copilot_premium -> JCODE_COPILOT_PREMIUM), and fingerprinting
     // first would guarantee a spurious full reload on the next check.
     let fingerprint = ConfigCacheFingerprint::current();
-    // Seed the global context-limit cache from named provider configs on first
-    // load so every codepath (TUI info widget, compaction budget, model
-    // switching) sees user-configured `context_window` values from the start.
-    // Read from the loaded config directly to avoid recursing into config(),
-    // which would deadlock on the still-initializing CONFIG_CACHE.
-    populate_context_limits_from_config_ref(config);
     RwLock::new(ConfigCache {
         config,
         fingerprint,
@@ -320,15 +314,6 @@ fn leak_config(config: Config) -> &'static Config {
     Box::leak(Box::new(config))
 }
 
-/// Seed the global context-limit cache from a config reference directly.
-///
-/// Used during CONFIG_CACHE initialization (where calling config() would
-/// deadlock) and shares its logic with
-/// `crate::provider::populate_context_limits_from_config`.
-fn populate_context_limits_from_config_ref(cfg: &Config) {
-    crate::provider::populate_context_limits_from_config_value(cfg);
-}
-
 /// Get the global config instance.
 ///
 /// The returned reference is backed by a reloadable process cache. Calls check
@@ -399,9 +384,6 @@ pub fn config() -> &'static Config {
         // as an unexplained prompt mutation.
         crate::cache_invalidation::record("config reload", &reason);
         notify_config_reloaded();
-        // Re-seed the global context-limit cache so user edits to named
-        // provider `context_window` values take effect without a restart.
-        crate::provider::populate_context_limits_from_config();
     }
 
     config

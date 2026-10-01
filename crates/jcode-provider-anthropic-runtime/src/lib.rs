@@ -2116,6 +2116,13 @@ impl Provider for AnthropicProvider {
     }
 
     fn context_window(&self) -> usize {
+        if let Some(binding) = self.profile_binding.as_ref()
+            && let Some(limit) =
+                jcode_base::provider::configured_model_entry(Some(&binding.name), &self.model())
+                    .and_then(|entry| entry.context_window)
+        {
+            return limit;
+        }
         context_window::resolve(&self.model())
     }
 

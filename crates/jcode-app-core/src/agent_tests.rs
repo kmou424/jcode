@@ -32,6 +32,138 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+#[derive(Clone)]
+struct LocalCompactionBudgetProvider {
+    local: bool,
+}
+
+#[async_trait]
+impl Provider for LocalCompactionBudgetProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("budget refresh does not send requests")
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "local-budget-test".into()
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        self.local
+    }
+
+    fn context_window(&self) -> usize {
+        1_000_000
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn local_compaction_threshold_refreshes_existing_agent_before_requests() {
+    let _lock = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let mut cfg = crate::config::Config::default();
+    cfg.providers.insert(
+        "budget-test".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "local-budget-test".into(),
+                compaction_threshold_tokens: Some(300_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    cfg.save().unwrap();
+    let mut agent = Agent::new(
+        Arc::new(LocalCompactionBudgetProvider { local: true }),
+        Registry::empty(),
+    );
+    agent.session.provider_key = Some("budget-test".into());
+    let messages: Vec<_> = (0..20)
+        .map(|_| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "small message".into(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        })
+        .collect();
+    let compaction = agent.registry.compaction();
+    {
+        let mut manager = compaction.try_write().unwrap();
+        manager.set_mode(crate::config::CompactionMode::Reactive);
+        manager.notify_message_added();
+        manager.update_observed_input_tokens(272_000);
+    }
+    agent.messages_for_provider();
+    assert!(
+        !compaction
+            .try_read()
+            .unwrap()
+            .should_compact_with(&messages)
+    );
+    cfg.providers.get_mut("budget-test").unwrap().models[0].compaction_threshold_tokens =
+        Some(272_000);
+    cfg.save().unwrap();
+    agent.messages_for_provider();
+    {
+        let manager = compaction.try_read().unwrap();
+        assert_eq!(manager.token_budget(), 1_000_000);
+        assert!(manager.should_compact_with(&messages));
+    }
+    agent.provider = Arc::new(LocalCompactionBudgetProvider { local: false });
+    agent.messages_for_provider();
+    assert!(
+        !compaction
+            .try_read()
+            .unwrap()
+            .should_compact_with(&messages)
+    );
+    agent.provider = Arc::new(LocalCompactionBudgetProvider { local: true });
+    cfg.providers.get_mut("budget-test").unwrap().models[0].compaction_threshold_tokens = None;
+    cfg.save().unwrap();
+    agent.messages_for_provider();
+    assert!(
+        !compaction
+            .try_read()
+            .unwrap()
+            .should_compact_with(&messages)
+    );
+}
+
 #[derive(Clone, Default)]
 struct SignatureSessionProvider {
     requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
