@@ -91,6 +91,17 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: jcode-macos-x86_64
+          - # Fully static musl builds run on Alpine, NixOS, and every glibc
+            # distro; build each arch on its native runner in an Alpine
+            # container so no cross toolchain is needed.
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            artifact: jcode-linux-musl-x86_64
+            musl_container: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: jcode-linux-musl-aarch64
+            musl_container: true
 
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +112,11 @@ jobs:
 
       - name: Configure SSH for cargo git dependencies
         uses: webfactory/ssh-agent@v0.9.0
+        # Forks do not carry DEPLOY_KEY; the git deps it unlocks are public
+        # anyway, so skip the agent instead of failing the job.
+        if: env.DEPLOY_KEY != ''
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
@@ -132,13 +148,13 @@ jobs:
           cache-all-crates: "true"
 
       - name: Install mold linker (Linux)
-        if: runner.os == 'Linux' && matrix.compat_container != true
+        if: runner.os == 'Linux' && matrix.compat_container != true && matrix.musl_container != true
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold
 
       - name: Build release binary
-        if: matrix.compat_container != true
+        if: matrix.compat_container != true && matrix.musl_container != true
         shell: bash
         run: |
           mkdir -p .cargo
@@ -177,8 +193,21 @@ jobs:
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
 
+      - name: Install musl toolchain (native musl-gcc; falls back to docker when absent)
+        if: matrix.musl_container == true
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static musl release binary
+        if: matrix.musl_container == true
+        shell: bash
+        run: scripts/build_musl.sh "${{ matrix.target }}" dist
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+
       - name: Package binary
-        if: matrix.compat_container != true
+        if: matrix.compat_container != true && matrix.musl_container != true
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
